@@ -1,9 +1,13 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #Include PhraseLibrary.ahk
 #Include FolderTree.ahk
 #Include TriggerEngine.ahk
 #Include SmartComplete.ahk
 #Include FolderTriggerMenu.ahk
+#Include MacroParser.ahk
+#Include MacroForms.ahk
+#Include MacroEngine.ahk
+#Include HotkeyAdapter.ahk
 
 class PhraseBoardApp {
     MaxEntries := 100
@@ -565,6 +569,7 @@ class PhraseBoardApp {
             OnClipboardChange(this.ClipCallback, 0)
         SetTimer(this.CaptureCallback, 0)
         this.TriggerEngine.Unregister()
+        HotkeyAdapter.UnregisterAll()
         if HasProp(this, "TypingHook")
             try this.TypingHook.Stop()
         this.DismissSmartComplete("Stopped")
@@ -572,7 +577,26 @@ class PhraseBoardApp {
     }
     RegisterPhrases() {
         this.TriggerEngine.Register(this.Phrases, this.Folders)
+        this.RegisterPhraseHotkeys()
         this.EnsureTypingMonitor()
+    }
+    RegisterPhraseHotkeys() {
+        HotkeyAdapter.UnregisterAll()
+        for phrase in this.Phrases {
+            for trigger in phrase.Triggers {
+                if trigger.Enabled && trigger.Kind = "Hotkey" && Trim(trigger.Value) {
+                    phraseId := phrase.Id
+                    targetTrigger := trigger
+                    HotkeyAdapter.Register(trigger.Value, (*) => this.OnPhraseHotkey(phraseId, targetTrigger))
+                }
+            }
+        }
+    }
+    OnPhraseHotkey(phraseId, trigger) {
+        target := WinExist("A")
+        if target = this.Window.Hwnd
+            return
+        this.InsertPhrase(phraseId, target, "Exact", "", "", trigger)
     }
     ExpandTrigger(inputMatch, *) {
         target := WinExist("A")
@@ -691,17 +715,23 @@ class PhraseBoardApp {
         }
     }
     ResolveTokens(text) {
-        text := StrReplace(text, "{{date}}", FormatTime(, "yyyy-MM-dd"))
-        text := StrReplace(text, "{{time}}", FormatTime(, "HH:mm"))
-        text := StrReplace(text, "{{clipboard}}", A_Clipboard)
-        text := StrReplace(text, "{{cursor}}", Chr(1))
-        while RegExMatch(text, "\{\{prompt:([^{}]+)\}\}", &m) {
-            answer := InputBox("Enter " m[1] ":", "PhraseBoard template")
-            if answer.Result != "OK"
-                return ""
-            text := StrReplace(text, m[0], answer.Value)
+        if !InStr(text, "{{")
+            return text
+        ctx := MacroEngine.NewContext()
+        ctx.ClipboardText := A_Clipboard
+        ctx.TargetHwnd := this.Target ? this.Target : WinExist("A")
+        ctx.Phrases := this.Phrases
+        res := MacroEngine.Render(text, ctx)
+        if res.Cancelled
+            return ""
+        for act in res.PostActions {
+            try act()
         }
-        return text
+        if res.CursorOffset > 0 && StrLen(res.Text) >= res.CursorOffset {
+            pos := StrLen(res.Text) - res.CursorOffset + 1
+            return SubStr(res.Text, 1, pos - 1) . Chr(1) . SubStr(res.Text, pos)
+        }
+        return res.Text
     }
     ExtractCursor(text) {
         marker := Chr(1)
@@ -713,13 +743,33 @@ class PhraseBoardApp {
         return {Text: before after, Cursor: StrLen(after)}
     }
     PreviewTemplate(text) {
-        text := StrReplace(text, "{{date}}", FormatTime(, "yyyy-MM-dd"))
-        text := StrReplace(text, "{{time}}", FormatTime(, "HH:mm"))
-        text := StrReplace(text, "{{clipboard}}", A_Clipboard)
-        text := StrReplace(text, "{{cursor}}", "|")
-        while RegExMatch(text, "\{\{prompt:([^{}]+)\}\}", &m)
-            text := StrReplace(text, m[0], "[" m[1] "]")
-        MsgBox(text, "Phrase preview")
+        ctx := MacroEngine.NewContext()
+        ctx.ClipboardText := A_Clipboard
+        ctx.Phrases := this.Phrases
+        ctx.FormCollected := true
+        parsed := MacroParser.Parse(text)
+        for node in parsed.Nodes {
+            if node.Type = "Macro" && (node.Name = "prompt" || node.Name = "form") {
+                for p in node.Params {
+                    k := p.Key ? p.Key : p.Value
+                    if k != "title" && !ctx.FormValues.Has(k)
+                        ctx.FormValues[k] := "[" k "]"
+                }
+            }
+        }
+        res := MacroEngine.Render(text, ctx)
+        previewText := res.Text
+        if res.CursorOffset > 0 && StrLen(previewText) >= res.CursorOffset {
+            pos := StrLen(previewText) - res.CursorOffset + 1
+            previewText := SubStr(previewText, 1, pos - 1) . "|" . SubStr(previewText, pos)
+        }
+        msg := previewText
+        if res.Errors.Length > 0 {
+            msg .= "`n`n--- Macro Notes / Warnings ---"
+            for err in res.Errors
+                msg .= "`n- " err.Message
+        }
+        MsgBox(msg, "PhraseBoard Macro Preview")
     }
     IsExcludedApp() {
         if !Trim(this.ExcludedApps)
@@ -852,9 +902,20 @@ class PhraseBoardApp {
         try {
             this.Window.Hide()
             this.Visible := false
+            foreHwnd := DllCall("user32\GetForegroundWindow", "Ptr")
+            foreThread := foreHwnd ? DllCall("user32\GetWindowThreadProcessId", "Ptr", foreHwnd, "Ptr", 0, "UInt") : 0
+            curThread := DllCall("kernel32\GetCurrentThreadId", "UInt")
+            if foreThread && foreThread != curThread
+                DllCall("user32\AttachThreadInput", "UInt", curThread, "UInt", foreThread, "Int", 1)
+            DllCall("user32\SetForegroundWindow", "Ptr", target)
+            DllCall("user32\BringWindowToTop", "Ptr", target)
             WinActivate("ahk_id " target)
-            if !WinWaitActive("ahk_id " target, , 2)
-                throw Error("Could not activate the destination window.")
+            if foreThread && foreThread != curThread
+                DllCall("user32\AttachThreadInput", "UInt", curThread, "UInt", foreThread, "Int", 0)
+            if !WinWaitActive("ahk_id " target, , 1) {
+                if !WinExist("ahk_id " target)
+                    throw Error("Could not activate the destination window.")
+            }
             for key in ["Ctrl", "Alt", "Shift", "LWin", "RWin"]
                 if !KeyWait(key, "T2")
                     throw Error("Release the modifier keys and try pasting again.")
@@ -864,6 +925,17 @@ class PhraseBoardApp {
             if !ClipWait(1)
                 throw Error("The clipboard was unavailable.")
             SendEvent("^v")
+            try {
+                ctrlHwnd := DllCall("user32\GetFocus", "Ptr")
+                if ctrlHwnd && !WinActive("ahk_id " target)
+                    SendMessage(0x302, 0, 0, , "ahk_id " ctrlHwnd)
+                else {
+                    focused := ControlGetFocus("ahk_id " target)
+                    if focused && !WinActive("ahk_id " target)
+                        SendMessage(0x302, 0, 0, focused, "ahk_id " target)
+                }
+            }
+
             if cursorChars {
                 Sleep(100)
                 SendEvent("{Left " cursorChars "}")
@@ -882,10 +954,16 @@ class PhraseBoardApp {
                 this.Show(this.Tab.Value)
         }
     }
-    PasteCurrentPlain(*) {
+    PasteCurrentPlain(target := 0, *) {
         text := A_Clipboard
-        if text
-            this.PasteValue(text, WinExist("A"))
+        if text {
+            if !target
+                target := WinExist("A")
+            if !target && this.Target
+                target := this.Target
+            if target
+                this.PasteValue(text, target)
+        }
     }
     PasteHistory(plain := false, *) {
         item := this.SelectedClip()
@@ -1869,7 +1947,31 @@ class PhraseBoardApp {
         triggerText := e.AddEdit("xm w560 r5 WantTab vTriggerLines",
             this.TriggerLines(IsObject(item) ? item.Triggers : [], selectedFolder))
         warningLabel := e.AddText("xm w560 r2 c9A6700", "")
+        e.AddText("xm", "Phrase Body")
+        insertMacroBtn := e.AddButton("x+290 yp-4 w150 h26", "+ Insert Macro...")
         body := e.AddEdit("xm w560 r12 WantTab vBody", IsObject(item) ? item.Text : initialText)
+        macroMenu := Menu()
+        macroMenu.Add("Date (YYYY-MM-DD)", (*) => InsertMacroText("{{date}}"))
+        macroMenu.Add("Date (Custom format)", (*) => InsertMacroText("{{date:format=yyyy-MM-dd}}"))
+        macroMenu.Add("Date (Offset +7 days)", (*) => InsertMacroText("{{date:format=yyyy-MM-dd|offset=+7d}}"))
+        macroMenu.Add("Time (HH:mm)", (*) => InsertMacroText("{{time}}"))
+        macroMenu.Add("Clipboard text", (*) => InsertMacroText("{{clipboard}}"))
+        macroMenu.Add("Cursor position", (*) => InsertMacroText("{{cursor}}"))
+        macroMenu.Add("Input prompt", (*) => InsertMacroText("{{prompt:Field Name|default=}}"))
+        macroMenu.Add("Interactive Form...", (*) => InsertMacroText("{{form:title=Details|name=Name|notes=Notes}}"))
+        macroMenu.Add("Nested phrase", (*) => InsertMacroText("{{phrase:Phrase Name}}"))
+        macroMenu.Add("Random alternative", (*) => InsertMacroText("{{random:Option A|Option B|Option C}}"))
+        macroMenu.Add("Variable (Set & Get)", (*) => InsertMacroText("{{set:var=value}}{{get:var}}"))
+        macroMenu.Add("Conditional (If/Else)", (*) => InsertMacroText("{{if:condition,expected,ThenText,ElseText}}"))
+        macroMenu.Add("Loop (Each)", (*) => InsertMacroText("{{each:item,A|B|C,• {{get:item}}`n}}"))
+        macroMenu.Add("Transform (Uppercase)", (*) => InsertMacroText("{{process:text,uppercase}}"))
+        macroMenu.Add("Math calculation", (*) => InsertMacroText("{{calc:100 * 1.15}}"))
+        insertMacroBtn.OnEvent("Click", (*) => macroMenu.Show())
+
+        InsertMacroText(str) {
+            body.Focus()
+            DllCall("user32\SendMessageW", "Ptr", body.Hwnd, "UInt", 0xC2, "Ptr", 1, "WStr", str)
+        }
         triggerText.OnEvent("Change", (*) => UpdateTriggerWarnings())
         body.OnEvent("Change", (*) => UpdateTriggerWarnings())
         errorLabel := e.AddText("xm w560 r2 cB42318", "")

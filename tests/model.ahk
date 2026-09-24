@@ -411,7 +411,7 @@ if failures.Length {
         FileAppend("FAIL: " failure "`n", "*")
     ExitApp(1)
 }
-FileAppend("All phrase model assertions passed.`n", "*")
+FileAppend("ALL MODEL TESTS PASSED`n", "*")
 ExitApp(0)
 
 Assert(condition, name) {
