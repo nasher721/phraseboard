@@ -1,0 +1,5 @@
+# Local PhraseBoard data and test artifacts
+*.clip
+*.dat
+*.log
+.superpowers/
