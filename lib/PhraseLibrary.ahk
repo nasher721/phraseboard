@@ -11,8 +11,9 @@ class PhraseLibrary {
             return {Phrases: phrases, Folders: folders}
         text := store.Read("phrases.dat")
         lines := StrSplit(text, "`n")
-        if lines.Length && RTrim(lines[1], "`r") = "PB3"
-            return this.LoadPB3(lines)
+        header := lines.Length ? RTrim(lines[1], "`r") : ""
+        if header = "PB3" || header = "PB4"
+            return this.LoadVersioned(lines, header)
         for line in lines {
             line := RTrim(line, "`r")
             if line = ""
@@ -37,7 +38,7 @@ class PhraseLibrary {
         return {Phrases: phrases, Folders: folders}
     }
 
-    static LoadPB3(lines) {
+    static LoadVersioned(lines, version) {
         phrases := []
         folders := []
         triggers := []
@@ -51,16 +52,17 @@ class PhraseLibrary {
                 continue
             fields := StrSplit(line, "`t")
             tag := fields[1]
-            counts := Map("P", 9, "F", 5, "T", 8, "O", 5)
+            counts := Map("P", version = "PB4" ? 10 : 9, "F", 5, "T", 8, "O", 5)
             if !counts.Has(tag) || fields.Length != counts[tag]
-                throw Error("Invalid PB3 " tag " record column count.")
+                throw Error("Invalid " version " " tag " record column count.")
             decoded := [tag]
             Loop fields.Length - 1
                 decoded.Push(SecureStore.Decode(fields[A_Index + 1], true))
             if tag = "P" {
                 p := PhraseModel.NormalizePhrase({Id: decoded[2], Name: decoded[3], Text: decoded[4],
                     Tags: decoded[5], Favorite: this.ParseBit(decoded[6]), Uses: this.ParseInteger(decoded[7]),
-                    Apps: decoded[8], FolderId: decoded[9], Triggers: []})
+                    Apps: decoded[8], FolderId: decoded[9],
+                    AiPhrase: version = "PB4" ? this.ParseBit(decoded[10]) : false, Triggers: []})
                 this.RegisterId(ids, p.Id, "phrase")
                 phrases.Push(p)
             } else if tag = "F" {
@@ -125,6 +127,7 @@ class PhraseLibrary {
                 throw Error("Phrase needs an ID, name, and text before saving.")
             if p.FolderId && !this.FindById(folders, p.FolderId)
                 throw Error("Phrase refers to a missing folder.")
+            PhraseModel.ValidatePhrase(p)
             this.RegisterId(ids, p.Id, "phrase")
             p.Triggers := this.NormalizeTriggers(p.Triggers, ids)
             p.Abbr := this.FirstAutotext(p.Triggers)
@@ -141,10 +144,10 @@ class PhraseLibrary {
             normalizedFolders.Push(f)
         }
         this.ValidateFolderTree(normalizedFolders)
-        output := "PB3`n"
+        output := "PB4`n"
         for p in normalizedPhrases {
             output .= this.Row("P", [p.Id, p.Name, p.Text, p.Tags, p.Favorite ? "1" : "0",
-                p.Uses, p.Apps, p.FolderId])
+                p.Uses, p.Apps, p.FolderId, p.AiPhrase ? "1" : "0"])
         }
         for f in normalizedFolders
             output .= this.Row("F", [f.Id, f.ParentId, f.Name, f.CreatedAt])
@@ -235,6 +238,15 @@ class PhraseLibrary {
             }
         }
     }
+    static ExportCsv(phrases) {
+        output := "Name,Abbreviation,Text,Tags,Favorite,AllowedApps`r`n"
+        for p in phrases
+            output .= this.CsvField(p.Name) "," this.CsvField(p.Abbr) "," this.CsvField(p.Text)
+                . "," this.CsvField(p.Tags) "," (p.Favorite ? "true" : "false") ","
+                . this.CsvField(p.Apps) "`r`n"
+        return output
+    }
+    static CsvField(value) => Chr(34) StrReplace(value, Chr(34), Chr(34) Chr(34)) Chr(34)
     static AssertUnique(records, id, kind) {
         for record in records
             if record.Id = id

@@ -18,6 +18,7 @@ Assert(phrase.Id = "legacy-1" && phrase.Name = "Signature" && phrase.Text = "Kin
 Assert(phrase.Triggers.Length = 1 && phrase.Triggers[1].Kind = "Autotext"
     && phrase.Triggers[1].Value = ";sig", "legacy abbreviation becomes an autotext trigger")
 Assert(phrase.FolderId = "", "legacy phrase defaults to root folder")
+Assert(!phrase.AiPhrase, "legacy phrase defaults to AI phrase off")
 
 sharedOne := PhraseModel.NormalizePhrase({Id: "shared-1", Name: "First", Text: "one",
     Triggers: [{Kind: "Autotext", Value: ";same"}]})
@@ -331,14 +332,16 @@ try {
     rootPhrase := {Id: "pb3-root", Name: "Root phrase", Text: "root-level text"}
     PhraseLibrary.Save(store, [persistedPhrase, rootPhrase], [persistedFolder])
     pb3Text := store.Read("phrases.dat")
-    Assert(StrSplit(pb3Text, "`n")[1] = "PB3", "new phrase libraries start with PB3 header")
+    Assert(StrSplit(pb3Text, "`n")[1] = "PB4", "new phrase libraries start with PB4 header")
     lines := StrSplit(pb3Text, "`n")
-    reordered := "PB3`n"
+    reordered := "PB4`n"
     Loop lines.Length - 2
         if lines[lines.Length - A_Index]
             reordered .= lines[lines.Length - A_Index] "`n"
     store.Write("phrases.dat", reordered)
+    beforeLoad := store.Read("phrases.dat")
     reloaded := PhraseLibrary.Load(store)
+    Assert(store.Read("phrases.dat") = beforeLoad, "loading a PB4 library does not rewrite it")
     savedPhrase := 0
     savedRootPhrase := 0
     savedFolder := 0
@@ -375,6 +378,34 @@ try {
         "PB3 folder trigger and inherited defaults round-trip")
     Assert(reloaded.Phrases.Length = 2 && savedRootPhrase.FolderId = "",
         "PB3 root-level phrases preserve an empty folder ID")
+    Assert(!savedPhrase.AiPhrase && !savedRootPhrase.AiPhrase,
+        "phrases saved without the AI flag stay unchecked")
+    uncheckedOriginal := store.Read("phrases.dat")
+    uncheckedRejected := false
+    uncheckedMessage := ""
+    try PhraseLibrary.Save(store, [{Id: "ai-off", Name: "Off", Text: "Hello {{ai:Summarize}}", AiPhrase: false}], [])
+    catch as err {
+        uncheckedRejected := true
+        uncheckedMessage := err.Message
+    }
+    Assert(uncheckedRejected && uncheckedMessage = "Check AI phrase or remove the AI macro before saving."
+        && store.Read("phrases.dat") = uncheckedOriginal,
+        "an AI macro cannot be saved while AI phrase is off")
+    blankMessage := ""
+    try PhraseModel.ValidatePhrase({Id: "ai-blank", Name: "Blank", Text: "{{ai}}", AiPhrase: true})
+    catch as err
+        blankMessage := err.Message
+    Assert(blankMessage = "AI macro requires an instruction.", "a blank AI macro is rejected on save")
+    PhraseLibrary.Save(store, [{Id: "ai-on", Name: "On", Text: "Hello {{ai:Summarize|notes}}", AiPhrase: true}], [])
+    aiLibrary := PhraseLibrary.Load(store)
+    Assert(aiLibrary.Phrases.Length = 1 && aiLibrary.Phrases[1].AiPhrase
+        && aiLibrary.Phrases[1].Text = "Hello {{ai:Summarize|notes}}",
+        "PB4 round-trips an AI phrase")
+    store.Write("phrases.dat", "PB3`n" PhraseLibrary.Row("P", ["pb3-old", "Old", "plain text", "", "0", "1", "", ""]))
+    pb3Before := store.Read("phrases.dat")
+    pb3Loaded := PhraseLibrary.Load(store)
+    Assert(store.Read("phrases.dat") = pb3Before && !pb3Loaded.Phrases[1].AiPhrase,
+        "PB3 libraries load as unchecked and are not rewritten")
 
     malformedCases := ["PB3`nX`tunknown", "PB3`nP`tbad", "PB3`nP`t"
         SecureStore.Encode("id") "`t" SecureStore.Encode("name") "`t"

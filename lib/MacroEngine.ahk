@@ -7,6 +7,8 @@ class MacroEngine {
     static MaxOutputLength := 100000
     static MaxLoopIterations := 100
     static MaxFileSizeBytes := 102400 ; 100 KB
+    static MaxAiCalls := 4
+    static MaxAiReplyChars := 32000
 
     static Render(templateText, context := 0) {
         if !IsObject(context)
@@ -16,7 +18,7 @@ class MacroEngine {
         if context.RecursionDepth = 0 && !context.FormCollected {
             preResult := this.Preflight(templateText, context)
             if preResult.Cancelled
-                return {Text: "", CursorOffset: 0, Cancelled: true, Errors: preResult.Errors}
+                return {Text: "", CursorOffset: 0, Cancelled: true, AiAborted: false, Errors: preResult.Errors}
         }
 
         parsed := MacroParser.Parse(templateText)
@@ -34,7 +36,8 @@ class MacroEngine {
             } else if node.Type = "Macro" {
                 expanded := this.EvaluateMacro(node, context)
                 if context.Cancelled
-                    return {Text: "", CursorOffset: 0, Cancelled: true, Errors: context.Errors}
+                    return {Text: "", CursorOffset: 0, Cancelled: true,
+                        AiAborted: HasProp(context, "AiAborted") && context.AiAborted, Errors: context.Errors}
 
                 if node.Name = "cursor" {
                     cursorPos := StrLen(resultText)
@@ -60,6 +63,7 @@ class MacroEngine {
             Text: resultText,
             CursorOffset: cursorOffset,
             Cancelled: false,
+            AiAborted: false,
             Errors: context.Errors,
             PostActions: context.PostActions
         }
@@ -159,6 +163,8 @@ class MacroEngine {
                 return this.EvalFile(node, context)
             case "form":
                 return this.EvalForm(node, context)
+            case "ai":
+                return this.EvalAi(node, context)
             default:
                 ; Check if there is a variable matching the macro name
                 if context.Variables.Has(name)
@@ -286,10 +292,13 @@ class MacroEngine {
         childContext := this.CloneContext(context)
         childContext.RecursionDepth := context.RecursionDepth + 1
         childContext.PhraseStack.Push(targetPhrase.Id)
+        childContext.CurrentAiPhrase := HasProp(targetPhrase, "AiPhrase") && !!targetPhrase.AiPhrase
 
         childResult := this.Render(targetPhrase.Text, childContext)
         if childResult.Cancelled {
             context.Cancelled := true
+            if childResult.AiAborted
+                context.AiAborted := true
             return ""
         }
         return childResult.Text
@@ -609,6 +618,72 @@ class MacroEngine {
         return 0
     }
 
+    static FailAi(context, message) {
+        context.Cancelled := true
+        context.AiAborted := true
+        context.Errors.Push({Message: message})
+        return ""
+    }
+
+    static EvalAi(node, context) {
+        if !HasProp(context, "CurrentAiPhrase") || !context.CurrentAiPhrase
+            return this.FailAi(context, "AI phrase is off.")
+        if context.RecursionDepth >= this.MaxRecursionDepth
+            return this.FailAi(context, "AI call exceeded the macro depth limit.")
+        context.RecursionDepth += 1
+        try {
+            instruction := ""
+            input := ""
+            if node.ParamMap.Has("instruction")
+                instruction := node.ParamMap["instruction"]
+            else if node.Params.Length
+                instruction := node.Params[1].Key = "" ? node.Params[1].Value : node.Params[1].Value
+            if node.ParamMap.Has("input")
+                input := node.ParamMap["input"]
+            else if node.Params.Length >= 2
+                input := node.Params[2].Value
+            instruction := this.ResolveNested(instruction, context)
+            if context.Cancelled
+                return ""
+            input := this.ResolveNested(input, context)
+            if context.Cancelled
+                return ""
+            if Trim(instruction) = ""
+                return this.FailAi(context, "AI macro requires an instruction.")
+            if !HasProp(context, "AiBudget") || !IsObject(context.AiBudget)
+                context.AiBudget := {Count: 0}
+            if context.AiBudget.Count >= this.MaxAiCalls
+                return this.FailAi(context, "AI expansion allows at most 4 calls.")
+            context.AiBudget.Count += 1
+            if !HasProp(context, "AiGenerate") || !context.AiGenerate
+                return this.FailAi(context, "Choose an AI model before sending.")
+            try result := context.AiGenerate.Call({Kind: "macro", Instruction: instruction, Input: input})
+            catch
+                return this.FailAi(context, "The AI request failed.")
+            if !IsObject(result) || !HasProp(result, "Ok") || !result.Ok {
+                message := IsObject(result) && HasProp(result, "Error") && result.Error ? result.Error : "The AI request failed."
+                return this.FailAi(context, message)
+            }
+            if Trim(result.Text) = ""
+                return this.FailAi(context, "AI reply was empty.")
+            if StrLen(result.Text) > this.MaxAiReplyChars
+                return this.FailAi(context, "AI reply exceeds 32,000 characters.")
+            return result.Text
+        } finally {
+            context.RecursionDepth -= 1
+        }
+    }
+
+    static ResolveNested(value, context) {
+        if InStr(value, "{{") {
+            rendered := this.Render(value, context)
+            if context.Cancelled || rendered.Cancelled
+                return ""
+            return rendered.Text
+        }
+        return value
+    }
+
     static NewContext() {
         return {
             ClipboardText: "",
@@ -622,7 +697,10 @@ class MacroEngine {
             PhraseStack: [],
             Cancelled: false,
             Errors: [],
-            PostActions: []
+            PostActions: [],
+            CurrentAiPhrase: false,
+            AiBudget: {Count: 0},
+            AiGenerate: 0
         }
     }
 
@@ -635,6 +713,9 @@ class MacroEngine {
         newCtx.FormCollected := ctx.FormCollected
         newCtx.RecursionDepth := ctx.RecursionDepth
         newCtx.PostActions := ctx.PostActions
+        newCtx.CurrentAiPhrase := HasProp(ctx, "CurrentAiPhrase") && !!ctx.CurrentAiPhrase
+        newCtx.AiBudget := HasProp(ctx, "AiBudget") && IsObject(ctx.AiBudget) ? ctx.AiBudget : {Count: 0}
+        newCtx.AiGenerate := HasProp(ctx, "AiGenerate") ? ctx.AiGenerate : 0
         for k, v in ctx.Variables
             newCtx.Variables[k] := v
         for id in ctx.PhraseStack

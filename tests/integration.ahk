@@ -29,11 +29,12 @@ try {
     app := PhraseBoardApp(directory)
     app.RegisterShortcuts()
     Assert(app.Phrases.Length = 1 && app.Phrases[1].Favorite
-        && app.Phrases[1].Tags = "migration,test" && app.Phrases[1].Apps = "notepad.exe",
-        "App loads all legacy phrase metadata")
+        && app.Phrases[1].Tags = "migration,test" && app.Phrases[1].Apps = "notepad.exe"
+        && !app.Phrases[1].AiPhrase,
+        "App loads all legacy phrase metadata with AI phrase off")
     app.SavePhrases()
-    Assert(StrSplit(store.Read("phrases.dat"), "`n")[1] = "PB3",
-        "Saving a migrated library writes the PB3 format")
+    Assert(StrSplit(store.Read("phrases.dat"), "`n")[1] = "PB4",
+        "Saving a migrated library writes the PB4 format")
     app.Phrases := []
     app.SavePhrases()
     app.RegisterPhrases()

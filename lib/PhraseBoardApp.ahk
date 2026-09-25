@@ -8,6 +8,9 @@
 #Include MacroForms.ahk
 #Include MacroEngine.ahk
 #Include HotkeyAdapter.ahk
+#Include AiSettings.ahk
+#Include AiService.ahk
+#Include AiWorkflows.ahk
 
 class PhraseBoardApp {
     MaxEntries := 100
@@ -45,6 +48,12 @@ class PhraseBoardApp {
     TypedBuffer := ""
     LastInputTick := 0
     LastInputGap := 0
+    AiKey := ""
+    ExpansionAborted := false
+    AiUndoArmed := false
+    ApplyingAi := false
+    AiUndoHotkeyOn := false
+    AiEditorHwnd := 0
 
     __New(directory, capture := true) {
         this.SmartCompleter := SmartComplete()
@@ -92,9 +101,24 @@ class PhraseBoardApp {
                     ? Max(8, Min(512, Integer(prefs[14]))) : 32) * 1024 * 1024
                 this.SmartCompleteMinChars := prefs.Length >= 15 && RegExMatch(prefs[15], "^\d+$")
                     ? Max(1, Min(32, Integer(prefs[15]))) : 3
+                this.AiSettings := AiSettings.Normalize({
+                    Provider: prefs.Length >= 16 ? prefs[16] : "",
+                    Endpoint: prefs.Length >= 17 ? SecureStore.Decode(prefs[17], true) : "",
+                    Model: prefs.Length >= 18 ? SecureStore.Decode(prefs[18], true) : "",
+                    Temperature: prefs.Length >= 19 ? prefs[19] : "",
+                    MaxTokens: prefs.Length >= 20 ? prefs[20] : "",
+                    TimeoutSec: prefs.Length >= 21 ? prefs[21] : ""
+                })
             } catch {
                 this.LastError := "Saved preferences could not be read. Defaults are in use."
             }
+        }
+        if !HasProp(this, "AiSettings")
+            this.AiSettings := AiSettings.Default()
+        if FileExist(this.Store.Dir "\ai-secrets.dat") {
+            try this.AiKey := this.Store.Read("ai-secrets.dat")
+            catch
+                this.AiKey := ""
         }
         files := ""
         Loop Files this.Store.Dir "\*.clip"
@@ -694,8 +718,14 @@ class PhraseBoardApp {
                 expandedSource := IsObject(trigger)
                     ? TriggerEngine.ApplyCase(inputMatch ? inputMatch : triggerValue, p.Text, trigger, this.Phrases)
                     : p.Text
-                expanded := this.ResolveTokens(expandedSource)
+                priorClip := ClipboardAll()
+                this.ExpansionAborted := false
+                expanded := this.ResolveTokens(expandedSource, p)
                 if expanded = "" {
+                    if this.ExpansionAborted {
+                        try A_Clipboard := priorClip
+                        return
+                    }
                     if triggerValue
                         SendText(triggerValue endChar)
                     return
@@ -714,16 +744,19 @@ class PhraseBoardApp {
             }
         }
     }
-    ResolveTokens(text) {
+    ResolveTokens(text, phrase := 0) {
         if !InStr(text, "{{")
             return text
         ctx := MacroEngine.NewContext()
         ctx.ClipboardText := A_Clipboard
         ctx.TargetHwnd := this.Target ? this.Target : WinExist("A")
         ctx.Phrases := this.Phrases
+        this.BindAiContext(ctx, IsObject(phrase) && HasProp(phrase, "AiPhrase") && phrase.AiPhrase)
         res := MacroEngine.Render(text, ctx)
-        if res.Cancelled
+        if res.Cancelled {
+            this.ExpansionAborted := this.ResultIsAiAbort(res)
             return ""
+        }
         for act in res.PostActions {
             try act()
         }
@@ -742,11 +775,23 @@ class PhraseBoardApp {
         before := SubStr(text, 1, position - 1)
         return {Text: before after, Cursor: StrLen(after)}
     }
-    PreviewTemplate(text) {
+    BindAiContext(ctx, aiPhrase) {
+        ctx.CurrentAiPhrase := !!aiPhrase
+        ctx.AiBudget := {Count: 0}
+        ctx.AiGenerate := ObjBindMethod(this, "GenerateAi")
+    }
+    GenerateAi(request) {
+        return AiService.Generate(request, this.AiSettings, this.AiKey, WinHttpTransport)
+    }
+    ResultIsAiAbort(res) {
+        return HasProp(res, "AiAborted") && res.AiAborted
+    }
+    PreviewTemplate(text, aiPhrase := false) {
         ctx := MacroEngine.NewContext()
         ctx.ClipboardText := A_Clipboard
         ctx.Phrases := this.Phrases
         ctx.FormCollected := true
+        this.BindAiContext(ctx, aiPhrase)
         parsed := MacroParser.Parse(text)
         for node in parsed.Nodes {
             if node.Type = "Macro" && (node.Name = "prompt" || node.Name = "form") {
@@ -827,7 +872,7 @@ class PhraseBoardApp {
         if abbr && !RegExMatch(abbr, "^[a-zA-Z0-9;._/-]{2,40}$")
             throw Error("Use 2-40 letters, numbers, or `; . _ / - for the abbreviation, with no spaces.")
     }
-    UpsertPhrase(name, abbr, text, id := "", tags := Chr(1), apps := Chr(1), folderId := "", editedTriggers := 0) {
+    UpsertPhrase(name, abbr, text, id := "", tags := Chr(1), apps := Chr(1), folderId := "", editedTriggers := 0, aiPhrase := false) {
         this.ValidatePhrase(name, abbr, text, id)
         copy := this.Phrases.Clone()
         existing := this.FindPhrase(id)
@@ -842,7 +887,8 @@ class PhraseBoardApp {
             Tags: tags = Chr(1) ? existing.Tags : Trim(tags),
             Favorite: existing.Favorite, Uses: existing.Uses,
             Apps: apps = Chr(1) ? existing.Apps : Trim(apps),
-            FolderId: targetFolder, Triggers: triggers}
+            FolderId: targetFolder, AiPhrase: !!aiPhrase, Triggers: triggers}
+        PhraseModel.ValidatePhrase(item)
         found := false
         for index, p in this.Phrases {
             if p.Id = id {
@@ -1066,7 +1112,24 @@ class PhraseBoardApp {
         this.FolderDefaultsButton.OnEvent("Click", (*) => this.EditFolderDefaults())
         this.Tab.UseTab(3)
         this.AddLabel("x35 y92 w710 h100", "Ctrl+Shift+V   Clipboard history`nAlt+Shift+V     Paste current clipboard as plain text`nCtrl+Alt+Space   Phrase library`nDouble-click an item to paste it into the app you were using.")
-        this.AddLabel("x35 y200 w710 h80", "History and phrases are encrypted for your Windows account.`nCurrent limit: " this.MaxEntries " copies / " (this.MaxBytes // (1024 * 1024)) " MB; pins stay protected.`nOriginal paste preserves available HTML/RTF formatting when the destination supports it.")
+        this.AddLabel("x35 y188 w710 h22", "AI sends text only for a checked AI phrase. The API key stays in its own encrypted file.")
+        this.AiProviderChoice := g.AddDropDownList("x35 y212 w150", ["Ollama", "OpenAI-compatible"])
+        this.AiProviderChoice.Value := this.AiSettings.Provider = "OpenAICompatible" ? 2 : 1
+        this.AiEndpointEdit := g.AddEdit("x195 y212 w250 h24", this.AiSettings.Endpoint)
+        DllCall("SendMessage", "Ptr", this.AiEndpointEdit.Hwnd, "UInt", 0x1501, "Ptr", 1, "Str", "Endpoint")
+        this.AiModelEdit := g.AddEdit("x455 y212 w220 h24", this.AiSettings.Model)
+        DllCall("SendMessage", "Ptr", this.AiModelEdit.Hwnd, "UInt", 0x1501, "Ptr", 1, "Str", "Model")
+        this.AiTemperatureEdit := g.AddEdit("x35 y242 w90 h24", this.AiSettings.Temperature)
+        DllCall("SendMessage", "Ptr", this.AiTemperatureEdit.Hwnd, "UInt", 0x1501, "Ptr", 1, "Str", "Temperature")
+        this.AiTokensEdit := g.AddEdit("x135 y242 w90 h24", this.AiSettings.MaxTokens)
+        DllCall("SendMessage", "Ptr", this.AiTokensEdit.Hwnd, "UInt", 0x1501, "Ptr", 1, "Str", "Max tokens")
+        this.AiTimeoutEdit := g.AddEdit("x235 y242 w80 h24", this.AiSettings.TimeoutSec)
+        DllCall("SendMessage", "Ptr", this.AiTimeoutEdit.Hwnd, "UInt", 0x1501, "Ptr", 1, "Str", "Timeout")
+        this.AiKeyEdit := g.AddEdit("x325 y242 w200 h24 Password", "")
+        DllCall("SendMessage", "Ptr", this.AiKeyEdit.Hwnd, "UInt", 0x1501, "Ptr", 1, "Str", this.AiKey ? "API key saved" : "API key")
+        g.AddButton("x535 y240 w90 h26", "Test").OnEvent("Click", (*) => this.TestAiConnection())
+        g.AddButton("x630 y240 w90 h26", "Save AI").OnEvent("Click", (*) => this.SaveAiSettings())
+        this.AiStatus := this.AddLabel("x35 y268 w700 h22", "")
         this.ExpansionCheck := g.AddCheckbox("x35 y295 w650", "Enable abbreviation expansion (type abbreviation, then Space or Enter)")
         this.ExpansionCheck.Value := this.Expansions
         this.ExpansionCheck.OnEvent("Click", (*) => this.ToggleExpansions())
@@ -1317,7 +1380,7 @@ class PhraseBoardApp {
             "|" (this.CaptureNonText ? 1 : 0) "|" (this.KeepOpenAfterPaste ? 1 : 0)
             "|" (this.SkipLikelySecrets ? 1 : 0) "|" this.Theme "|" this.FontSize "|" this.Density
             "|" this.HistorySort "|" this.PhraseSort "|" this.MaxEntries "|" (this.MaxBytes // (1024 * 1024))
-            "|" this.SmartCompleteMinChars)
+            "|" this.SmartCompleteMinChars "|" AiSettings.PreferenceSuffix(this.AiSettings))
     }
     UpdateSmartCompleteMinChars(*) {
         value := Trim(this.SmartCompleteMinEdit.Value)
@@ -1583,7 +1646,8 @@ class PhraseBoardApp {
             this.FavoriteButton, this.ExpansionCheck, this.SecretCheck, this.NonTextCheck, this.StartCheck,
             this.RetentionEdit, this.ExcludedEdit, this.ThemeChoice, this.FontChoice, this.DensityChoice,
             this.HistorySortChoice, this.PhraseSortChoice, this.EntryLimitEdit, this.StorageLimitEdit,
-            this.Status]
+            this.Status, this.AiProviderChoice, this.AiEndpointEdit, this.AiModelEdit,
+            this.AiTemperatureEdit, this.AiTokensEdit, this.AiTimeoutEdit, this.AiKeyEdit, this.AiStatus]
         for control in controls {
             try control.SetFont("s" this.FontSize " c" textColor, "Segoe UI")
             try control.Opt(dark ? "Background20242C" : "BackgroundF5F7FA")
@@ -1759,11 +1823,7 @@ class PhraseBoardApp {
         path := FileSelect("S16", , "Export PhraseBoard phrases", "CSV files (*.csv)")
         if !path
             return
-        output := "Name,Abbreviation,Text,Tags,Favorite,AllowedApps`r`n"
-        for p in this.Phrases
-            output .= this.CsvField(p.Name) "," this.CsvField(p.Abbr) "," this.CsvField(p.Text)
-                . "," this.CsvField(p.Tags) "," (p.Favorite ? "true" : "false") ","
-                . this.CsvField(p.Apps) "`r`n"
+        output := PhraseLibrary.ExportCsv(this.Phrases)
         try {
             file := FileOpen(path, "w", "UTF-8-RAW")
             try file.Write(output)
@@ -1910,6 +1970,203 @@ class PhraseBoardApp {
         if IsObject(item) && item.Kind = "text"
             this.EditPhrase(0, item.Text)
     }
+    ReadAiForm() {
+        provider := this.AiProviderChoice.Text = "OpenAI-compatible" ? "OpenAICompatible" : "Ollama"
+        settings := AiSettings.Validate({
+            Provider: provider,
+            Endpoint: this.AiEndpointEdit.Value,
+            Model: this.AiModelEdit.Value,
+            Temperature: this.AiTemperatureEdit.Value,
+            MaxTokens: this.AiTokensEdit.Value,
+            TimeoutSec: this.AiTimeoutEdit.Value
+        })
+        key := Trim(this.AiKeyEdit.Value)
+        if key = ""
+            key := this.AiKey
+        return {Settings: settings, Key: key}
+    }
+    SaveAiSettings(*) {
+        try {
+            form := this.ReadAiForm()
+            this.AiSettings := form.Settings
+            this.AiKey := form.Key
+            this.SavePreferences()
+            if Trim(this.AiKey) = ""
+                this.Store.Delete("ai-secrets.dat")
+            else
+                this.Store.Write("ai-secrets.dat", this.AiKey)
+            this.AiKeyEdit.Value := ""
+            this.AiStatus.Text := "AI settings saved."
+        } catch as err {
+            this.AiStatus.Text := AiSettings.Redact(err.Message, this.AiKey)
+        }
+    }
+    TestAiConnection(*) {
+        try {
+            form := this.ReadAiForm()
+            result := AiService.Generate({Kind: "test", Input: "", Instruction: ""},
+                form.Settings, form.Key, WinHttpTransport)
+            this.AiStatus.Text := result.Ok ? "Connection succeeded." : result.Error
+        } catch as err {
+            this.AiStatus.Text := AiSettings.Redact(err.Message, this.AiKey)
+        }
+    }
+    NoteEditorTyping() {
+        if this.ApplyingAi
+            return
+        this.AiUndoArmed := false
+        this.SetAiUndoHotkey(false)
+    }
+    ClearAiUndo(*) {
+        this.AiUndo := []
+        this.AiUndoArmed := false
+        this.SetAiUndoHotkey(false)
+        this.AiEditorHwnd := 0
+    }
+    SetAiUndoHotkey(enabled) {
+        if !this.AiEditorHwnd
+            return
+        HotIfWinActive("ahk_id " this.AiEditorHwnd)
+        if enabled && !this.AiUndoHotkeyOn {
+            Hotkey("^z", ObjBindMethod(this, "UndoAiEdit"), "On")
+            this.AiUndoHotkeyOn := true
+        } else if !enabled && this.AiUndoHotkeyOn {
+            Hotkey("^z", "Off")
+            this.AiUndoHotkeyOn := false
+        }
+        HotIfWinActive()
+    }
+    UndoAiEdit(*) {
+        if !this.AiUndoArmed || !this.AiUndo.Length
+            return
+        entry := this.AiUndo.Pop()
+        this.ApplyingAi := true
+        this.AiEditorName.Value := entry.Name
+        this.AiEditorBody.Value := entry.Body
+        this.ApplyingAi := false
+        this.AiUndoArmed := this.AiUndo.Length > 0
+        if !this.AiUndoArmed
+            this.SetAiUndoHotkey(false)
+    }
+    RememberAiEdit() {
+        if !HasProp(this, "AiUndo") || !IsObject(this.AiUndo)
+            this.AiUndo := []
+        this.AiUndo.Push({Name: this.AiEditorName.Value, Body: this.AiEditorBody.Value})
+        this.AiUndoArmed := true
+        this.SetAiUndoHotkey(true)
+    }
+    EditSelection(edit) {
+        start := 0
+        end := 0
+        DllCall("SendMessage", "Ptr", edit.Hwnd, "UInt", 0xB0, "UInt*", &start, "UInt*", &end)
+        return {Start: start, End: end}
+    }
+    AskText(title, label) {
+        holder := {Accepted: false, Result: ""}
+        g := Gui("+AlwaysOnTop +Owner" this.AiEditorHwnd, title)
+        g.SetFont("s10", "Segoe UI")
+        g.AddText("xm", label)
+        edit := g.AddEdit("xm w460")
+        g.AddButton("xm w90 Default", "Send").OnEvent("Click", (*) => this.AcceptTextDialog(holder, edit, g))
+        g.AddButton("x+10 w90", "Cancel").OnEvent("Click", (*) => g.Destroy())
+        g.OnEvent("Escape", (*) => g.Destroy())
+        g.Show()
+        WinWaitClose("ahk_id " g.Hwnd)
+        return holder.Accepted ? Trim(holder.Result) : ""
+    }
+    AcceptTextDialog(holder, edit, gui) {
+        holder.Accepted := true
+        holder.Result := edit.Value
+        gui.Destroy()
+    }
+    AskInstruction() {
+        holder := {Choice: 0}
+        g := Gui("+AlwaysOnTop +Owner" this.AiEditorHwnd, "Improve text")
+        g.SetFont("s10", "Segoe UI")
+        g.AddText("xm", "Preset")
+        preset := g.AddDropDownList("xm w220", ["Shorten", "Clarify", "Fix grammar", "Custom"])
+        preset.Choose(1)
+        g.AddText("xm", "Custom instruction")
+        custom := g.AddEdit("xm w460")
+        g.AddButton("xm w90 Default", "Send").OnEvent("Click", (*) => this.AcceptInstructionDialog(holder, preset, custom, g))
+        g.AddButton("x+10 w90", "Cancel").OnEvent("Click", (*) => g.Destroy())
+        g.OnEvent("Escape", (*) => g.Destroy())
+        g.Show()
+        WinWaitClose("ahk_id " g.Hwnd)
+        return holder.Choice
+    }
+    AcceptInstructionDialog(holder, preset, custom, gui) {
+        holder.Choice := {Preset: preset.Text, Custom: custom.Value}
+        gui.Destroy()
+    }
+    AskKeep(title, text) {
+        holder := {Kept: false}
+        g := Gui("+AlwaysOnTop +Owner" this.AiEditorHwnd, title)
+        g.SetFont("s10", "Segoe UI")
+        g.AddEdit("xm w520 r12 ReadOnly", text)
+        g.AddButton("xm w90 Default", "Keep").OnEvent("Click", (*) => this.AcceptKeepDialog(holder, g))
+        g.AddButton("x+10 w90", "Discard").OnEvent("Click", (*) => g.Destroy())
+        g.OnEvent("Escape", (*) => g.Destroy())
+        g.Show()
+        WinWaitClose("ahk_id " g.Hwnd)
+        return holder.Kept
+    }
+    AcceptKeepDialog(holder, gui) {
+        holder.Kept := true
+        gui.Destroy()
+    }
+    GeneratePhraseDraft(name, body, errorLabel) {
+        description := this.AskText("Generate phrase", "Describe the phrase")
+        if description = ""
+            return
+        result := AiService.Generate({Kind: "generate", Input: description, Instruction: ""},
+            this.AiSettings, this.AiKey, WinHttpTransport)
+        if !result.Ok {
+            errorLabel.Text := result.Error
+            return
+        }
+        try draft := AiWorkflows.ParseGenerated(result.Text)
+        catch as err {
+            errorLabel.Text := err.Message
+            return
+        }
+        if !this.AskKeep("Keep this generated phrase?", draft.Name "`n`n" draft.Body)
+            return
+        this.RememberAiEdit()
+        this.ApplyingAi := true
+        name.Value := draft.Name
+        body.Value := draft.Body
+        this.ApplyingAi := false
+        errorLabel.Text := ""
+    }
+    ImprovePhraseSelection(body, errorLabel) {
+        choice := this.AskInstruction()
+        if !IsObject(choice)
+            return
+        try instruction := AiWorkflows.PresetInstruction(choice.Preset, choice.Custom)
+        catch as err {
+            errorLabel.Text := err.Message
+            return
+        }
+        sel := this.EditSelection(body)
+        whole := sel.Start = sel.End
+        source := whole ? body.Value : SubStr(body.Value, sel.Start + 1, sel.End - sel.Start)
+        start := whole ? 0 : sel.Start
+        end := whole ? StrLen(body.Value) : sel.End
+        result := AiService.Generate({Kind: "improve", Instruction: instruction, Input: source},
+            this.AiSettings, this.AiKey, WinHttpTransport)
+        if !result.Ok {
+            errorLabel.Text := result.Error
+            return
+        }
+        if !this.AskKeep("Keep this improved text?", result.Text)
+            return
+        this.RememberAiEdit()
+        this.ApplyingAi := true
+        body.Value := AiWorkflows.ApplyReplacement(body.Value, start, end, result.Text)
+        this.ApplyingAi := false
+        errorLabel.Text := ""
+    }
     EditPhrase(item := 0, initialText := "", folderId := "") {
         if HasProp(this, "Editor") {
             try this.Editor.Destroy()
@@ -1947,6 +2204,9 @@ class PhraseBoardApp {
         triggerText := e.AddEdit("xm w560 r5 WantTab vTriggerLines",
             this.TriggerLines(IsObject(item) ? item.Triggers : [], selectedFolder))
         warningLabel := e.AddText("xm w560 r2 c9A6700", "")
+        aiCheck := e.AddCheckbox("xm", "AI phrase")
+        aiCheck.Value := IsObject(item) && HasProp(item, "AiPhrase") && item.AiPhrase
+        e.AddText("xm w560", "Checking this box allows Generate, Improve, and {{ai}} to send text. There is no extra prompt.")
         e.AddText("xm", "Phrase Body")
         insertMacroBtn := e.AddButton("x+290 yp-4 w150 h26", "+ Insert Macro...")
         body := e.AddEdit("xm w560 r12 WantTab vBody", IsObject(item) ? item.Text : initialText)
@@ -1966,23 +2226,51 @@ class PhraseBoardApp {
         macroMenu.Add("Loop (Each)", (*) => InsertMacroText("{{each:item,A|B|C,• {{get:item}}`n}}"))
         macroMenu.Add("Transform (Uppercase)", (*) => InsertMacroText("{{process:text,uppercase}}"))
         macroMenu.Add("Math calculation", (*) => InsertMacroText("{{calc:100 * 1.15}}"))
+        macroMenu.Add("AI instruction", (*) => InsertMacroText("{{ai:instruction|{{clipboard}}}}"))
         insertMacroBtn.OnEvent("Click", (*) => macroMenu.Show())
+        if !aiCheck.Value
+            macroMenu.Disable("AI instruction")
 
         InsertMacroText(str) {
             body.Focus()
             DllCall("user32\SendMessageW", "Ptr", body.Hwnd, "UInt", 0xC2, "Ptr", 1, "WStr", str)
         }
         triggerText.OnEvent("Change", (*) => UpdateTriggerWarnings())
-        body.OnEvent("Change", (*) => UpdateTriggerWarnings())
+        body.OnEvent("Change", NoteBodyChange)
+        name.OnEvent("Change", (*) => this.NoteEditorTyping())
         errorLabel := e.AddText("xm w560 r2 cB42318", "")
-        previewButton := e.AddButton("xm w130", "Preview result")
-        previewButton.OnEvent("Click", (*) => this.PreviewTemplate(body.Value))
-        saveButton := e.AddButton("x+10 w130 Default vSavePhrase", "Save phrase")
+        generateButton := e.AddButton("xm w110", "Generate")
+        improveButton := e.AddButton("x+8 w110", "Improve")
+        previewButton := e.AddButton("x+8 w130", "Preview result")
+        generateButton.Enabled := aiCheck.Value
+        improveButton.Enabled := aiCheck.Value
+        aiCheck.OnEvent("Click", SyncAiControls)
+        generateButton.OnEvent("Click", (*) => this.GeneratePhraseDraft(name, body, errorLabel))
+        improveButton.OnEvent("Click", (*) => this.ImprovePhraseSelection(body, errorLabel))
+        previewButton.OnEvent("Click", (*) => this.PreviewTemplate(body.Value, aiCheck.Value))
+        saveButton := e.AddButton("xm w130 Default vSavePhrase", "Save phrase")
         saveButton.OnEvent("Click", SavePhraseClick)
         e.AddButton("x+10 w100", "Cancel").OnEvent("Click", (*) => e.Destroy())
         e.OnEvent("Escape", (*) => e.Destroy())
+        e.OnEvent("Close", (*) => this.ClearAiUndo())
+        this.AiUndo := []
+        this.AiEditorHwnd := e.Hwnd
+        this.AiEditorName := name
+        this.AiEditorBody := body
+        SyncAiControls()
         UpdateTriggerWarnings()
         e.Show()
+        SyncAiControls(*) {
+            enabled := !!aiCheck.Value
+            generateButton.Enabled := enabled
+            improveButton.Enabled := enabled
+            try {
+                if enabled
+                    macroMenu.Enable("AI instruction")
+                else
+                    macroMenu.Disable("AI instruction")
+            }
+        }
         SavePhraseClick(*) {
             try {
                 chosenFolder := folderIds[folderChoice.Value]
@@ -1993,12 +2281,16 @@ class PhraseBoardApp {
                 if Trim(abbr.Value) != priorAbbr
                     editedAbbr := Trim(abbr.Value)
                 this.UpsertPhrase(name.Value, editedAbbr, body.Value, IsObject(item) ? item.Id : "",
-                    tags.Value, apps.Value, chosenFolder, editedTriggers)
+                    tags.Value, apps.Value, chosenFolder, editedTriggers, aiCheck.Value)
                 this.RefreshFolderChoices()
                 e.Destroy()
             } catch as err {
                 errorLabel.Text := err.Message
             }
+        }
+        NoteBodyChange(*) {
+            UpdateTriggerWarnings()
+            this.NoteEditorTyping()
         }
         UpdateTriggerWarnings(*) {
             warnings := []

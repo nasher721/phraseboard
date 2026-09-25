@@ -1,4 +1,5 @@
 #Requires AutoHotkey v2.0
+#Include MacroParser.ahk
 
 class PhraseModel {
     static TriggerKinds := Map(
@@ -40,6 +41,7 @@ class PhraseModel {
             Uses: HasProp(record, "Uses") ? Integer(record.Uses) : 0,
             Apps: this.StringField(record, "Apps"),
             FolderId: this.StringField(record, "FolderId"),
+            AiPhrase: HasProp(record, "AiPhrase") && !!record.AiPhrase,
             Triggers: triggers
         }
     }
@@ -50,9 +52,44 @@ class PhraseModel {
             throw Error("Enter a phrase name and its text.")
         if StrLen(phrase.Text) > 100000
             throw Error("Keep each phrase under 100,000 characters.")
+        if this.HasBlankAiMacro(phrase.Text)
+            throw Error("AI macro requires an instruction.")
+        if this.ContainsAiMacro(phrase.Text) && !phrase.AiPhrase
+            throw Error("Check AI phrase or remove the AI macro before saving.")
         for trigger in phrase.Triggers
             this.NormalizeTrigger(trigger)
         return true
+    }
+
+    static ContainsAiMacro(text) {
+        return this.NodesHaveAi(MacroParser.Parse(text).Nodes, false)
+    }
+
+    static HasBlankAiMacro(text) {
+        return this.NodesHaveAi(MacroParser.Parse(text).Nodes, true)
+    }
+
+    static NodesHaveAi(nodes, blankOnly) {
+        for node in nodes {
+            if node.Type != "Macro"
+                continue
+            if node.Name = "ai" {
+                instruction := ""
+                if node.ParamMap.Has("instruction")
+                    instruction := node.ParamMap["instruction"]
+                else if node.Params.Length
+                    instruction := node.Params[1].Key = "" ? node.Params[1].Value : node.Params[1].Value
+                if blankOnly {
+                    if Trim(instruction) = ""
+                        return true
+                } else
+                    return true
+            }
+            for param in node.Params
+                if InStr(param.Value, "{{") && this.NodesHaveAi(MacroParser.Parse(param.Value).Nodes, blankOnly)
+                    return true
+        }
+        return false
     }
 
     static NormalizeTrigger(record) {

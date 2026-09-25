@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $runtime = Join-Path $env:LOCALAPPDATA 'Programs\AutoHotkey\v2\AutoHotkey64.exe'
-foreach ($name in @('smoke', 'model', 'macros', 'hotkeys', 'integration')) {
+foreach ($name in @('smoke', 'model', 'macros', 'hotkeys', 'ai', 'integration')) {
     $script = Join-Path $PSScriptRoot ($name + '.ahk')
     if (-not (Test-Path -LiteralPath $script)) { continue }
     $out = Join-Path $env:TEMP ('phraseboard-' + $name + '.out.log')
