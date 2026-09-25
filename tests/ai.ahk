@@ -37,15 +37,15 @@ class FakeAi {
     }
 }
 
-round := Json.Decode(Json.Encode(Map("ok", true, "n", 2, "items", ["a", "b"])))
-Assert(round["ok"] = true && round["n"] = 2 && round["items"][2] = "b", "JSON round-trips objects, numbers, and arrays")
+roundResult := Json.Decode(Json.Encode(Map("ok", true, "n", 2, "items", ["a", "b"])))
+Assert(roundResult["ok"] = true && roundResult["n"] = 2 && roundResult["items"][2] = "b", "JSON round-trips objects, numbers, and arrays")
 duplicateRejected := false
-try Json.Decode("{""a"":1,""a"":2}")
+try Json.Decode('{"a":1,"a":2}')
 catch
     duplicateRejected := true
 Assert(duplicateRejected, "JSON rejects duplicate keys")
 trailingRejected := false
-try Json.Decode("{""a"":1} trailing")
+try Json.Decode('{"a":1} trailing')
 catch
     trailingRejected := true
 Assert(trailingRejected, "JSON rejects trailing data")
