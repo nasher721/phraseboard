@@ -11,6 +11,7 @@
 #Include AiSettings.ahk
 #Include AiService.ahk
 #Include AiWorkflows.ahk
+#Include RichText.ahk
 
 class PhraseBoardApp {
     MaxEntries := 100
@@ -63,6 +64,7 @@ class PhraseBoardApp {
     AiEditorHwnd := 0
 
     __New(directory, capture := true) {
+        RichText.Init()
         this.SmartCompleter := SmartComplete()
         this.TypingRate := TriggerEngine.TypingRate()
         this.Store := SecureStore(directory)
@@ -742,13 +744,21 @@ class PhraseBoardApp {
                     return
                 }
                 value := this.ExtractCursor(expanded)
-                SendText(value.Text)
                 terminator := TriggerEngine.TerminatorAction(IsObject(trigger) ? trigger : {Options: Map()}, endChar) = "Keep"
                     ? endChar : ""
-                if terminator
-                    SendText(endChar)
-                if value.Cursor
-                    SendEvent("{Left " (value.Cursor + StrLen(terminator)) "}")
+                if HasProp(p, "Rtf") && p.Rtf != "" {
+                    resolvedRtf := RichText.ResolveRichMacros(p.Rtf, (token) => this.ResolveTokens(token, p))
+                    richClip := RichText.BuildRichClip(value.Text, resolvedRtf)
+                    this.PasteValue(richClip, targetHwnd ? targetHwnd : this.Target, value.Cursor)
+                    if terminator
+                        SendText(terminator)
+                } else {
+                    SendText(value.Text)
+                    if terminator
+                        SendText(endChar)
+                    if value.Cursor
+                        SendEvent("{Left " (value.Cursor + StrLen(terminator)) "}")
+                }
                 p.Uses += 1
                 try SetTimer(ObjBindMethod(this, "SavePhrases"), -1000)
                 return
@@ -891,7 +901,7 @@ class PhraseBoardApp {
         if abbr && !RegExMatch(abbr, "^[a-zA-Z0-9;._/-]{1,40}$")
             throw Error("Use 1-40 letters, numbers, or `; . _ / - for the abbreviation, with no spaces.")
     }
-    UpsertPhrase(name, abbr, text, id := "", tags := Chr(1), apps := Chr(1), folderId := "", editedTriggers := 0, aiPhrase := false) {
+    UpsertPhrase(name, abbr, text, id := "", tags := Chr(1), apps := Chr(1), folderId := "", editedTriggers := 0, aiPhrase := false, rtf := Chr(1)) {
         this.ValidatePhrase(name, abbr, text, id)
         copy := this.Phrases.Clone()
         existing := this.FindPhrase(id)
@@ -901,8 +911,10 @@ class PhraseBoardApp {
         defaults := targetFolder ? this.GetFolderTree().EffectiveDefaults(targetFolder) : Map()
         inheritedMode := defaults.Has("Mode") ? "" : "Immediate"
         this.SyncLegacyAbbr(triggers, abbr, inheritedMode)
+        targetRtf := rtf = Chr(1) ? (id && HasProp(existing, "Rtf") ? existing.Rtf : "") : String(rtf)
         item := {Id: id ? id : this.NewId(), Name: Trim(name),
             Abbr: PhraseModel.FirstAutotext(triggers), Text: text,
+            Rtf: targetRtf, Format: targetRtf != "" ? "rich" : "text",
             Tags: tags = Chr(1) ? existing.Tags : Trim(tags),
             Favorite: existing.Favorite, Uses: existing.Uses,
             Apps: apps = Chr(1) ? existing.Apps : Trim(apps),
@@ -1022,10 +1034,10 @@ class PhraseBoardApp {
     PasteCurrentPlain(target := 0, *) {
         text := A_Clipboard
         if text {
-            if !target
-                target := WinExist("A")
             if !target && this.Target
                 target := this.Target
+            if !target
+                target := WinExist("A")
             if target
                 this.PasteValue(text, target)
         }
@@ -1038,7 +1050,7 @@ class PhraseBoardApp {
             this.PasteValue(plain ? item.Text : item.Data, this.Target)
         }
     }
-    PastePhrase(*) {
+    PastePhrase(plain := false, *) {
         p := this.SelectedPhrase()
         if IsObject(p) {
             if !this.PhraseAllowedInTarget(p, this.Target) {
@@ -1056,7 +1068,13 @@ class PhraseBoardApp {
             value := this.ExtractCursor(value)
             p.Uses += 1
             try this.SavePhrases()
-            this.PasteValue(value.Text, this.Target, value.Cursor)
+            if !plain && HasProp(p, "Rtf") && p.Rtf != "" {
+                resolvedRtf := RichText.ResolveRichMacros(p.Rtf, (token) => this.ResolveTokens(token, p))
+                richClip := RichText.BuildRichClip(value.Text, resolvedRtf)
+                this.PasteValue(richClip, this.Target, value.Cursor)
+            } else {
+                this.PasteValue(value.Text, this.Target, value.Cursor)
+            }
         }
     }
     PasteQuoted(*) {
@@ -1116,7 +1134,7 @@ class PhraseBoardApp {
         this.PhraseList.OnEvent("ItemSelect", (*) => this.PreviewPhrase())
         this.PhraseList.OnEvent("DoubleClick", (*) => this.PastePhrase())
         this.PhraseList.OnEvent("ContextMenu", (ctrl, row, rightClick, x, y) => this.PhraseContextMenu(row, x, y))
-        this.PhrasePreview := g.AddEdit("x30 y345 w735 h112 ReadOnly Multi")
+        this.PhrasePreview := g.AddCustom("ClassRICHEDIT50W x30 y345 w735 h112 ReadOnly +0x50010804 +0x10000")
         this.InsertButton := g.AddButton("x30 y471 w160 h32", "Insert phrase")
         this.InsertButton.OnEvent("Click", (*) => this.PastePhrase())
         this.NewButton := g.AddButton("x200 y471 w130 h32", "New phrase")
@@ -1367,7 +1385,8 @@ class PhraseBoardApp {
                 if shared.Length > 1
                     suffix := "  ↔ " shared.Length " phrases"
             }
-            this.PhraseList.Add("", (p.Favorite ? "★ " : "") p.Name, p.Abbr suffix "  " p.Tags)
+            richBadge := (HasProp(p, "Rtf") && p.Rtf != "") ? "[Rich] " : ""
+            this.PhraseList.Add("", (p.Favorite ? "★ " : "") p.Name, p.Abbr suffix "  " richBadge p.Tags)
         }
         this.PhraseList.ModifyCol(1, 490)
         this.PhraseList.ModifyCol(2, 220)
@@ -1381,7 +1400,14 @@ class PhraseBoardApp {
     }
     PreviewPhrase(*) {
         p := this.SelectedPhrase()
-        this.PhrasePreview.Value := IsObject(p) ? p.Text : "Create a phrase, for example `;sig for your signature."
+        if IsObject(p) {
+            if HasProp(p, "Rtf") && p.Rtf != ""
+                RichText.SetRtf(this.PhrasePreview.Hwnd, p.Text, p.Rtf)
+            else
+                ControlSetText(p.Text, this.PhrasePreview)
+        } else {
+            ControlSetText("Create a phrase, for example `;sig for your signature.", this.PhrasePreview)
+        }
         for button in [this.InsertButton, this.EditButton, this.RemoveButton]
             button.Enabled := IsObject(p)
         this.FavoriteButton.Enabled := IsObject(p)
@@ -1428,10 +1454,17 @@ class PhraseBoardApp {
         if row
             this.PhraseList.Modify(row, "Select")
         phrase := this.SelectedPhrase()
-        if !IsObject(phrase) || !phrase.Abbr
+        if !IsObject(phrase)
             return
         menu := Menu()
-        menu.Add("Find phrases using this trigger", (*) => this.ShowTriggerMatches(phrase))
+        if HasProp(phrase, "Rtf") && phrase.Rtf != "" {
+            menu.Add("Paste formatted phrase", (*) => this.PastePhrase(false))
+            menu.Add("Paste as plain text", (*) => this.PastePhrase(true))
+            menu.Add()
+        }
+        menu.Add("Edit phrase...", (*) => this.EditSelected())
+        if phrase.Abbr
+            menu.Add("Find phrases using this trigger", (*) => this.ShowTriggerMatches(phrase))
         menu.Show(x, y)
     }
     ShowTriggerMatches(phrase) {
@@ -1991,8 +2024,10 @@ class PhraseBoardApp {
     }
     ClipToPhrase(*) {
         item := this.SelectedClip()
-        if IsObject(item) && item.Kind = "text"
-            this.EditPhrase(0, item.Text)
+        if IsObject(item) && item.Kind = "text" {
+            clipRtf := RichText.ExtractRtfFromClip(item.Data)
+            this.EditPhrase(0, item.Text, "", clipRtf)
+        }
     }
     ReadAiForm() {
         provider := this.AiProviderChoice.Text = "OpenAI-compatible" ? "OpenAICompatible" : "Ollama"
@@ -2208,7 +2243,7 @@ class PhraseBoardApp {
         this.ApplyingAi := false
         errorLabel.Text := ""
     }
-    EditPhrase(item := 0, initialText := "", folderId := "") {
+    EditPhrase(item := 0, initialText := "", folderId := "", initialRtf := "") {
         if HasProp(this, "Editor") {
             this.ClearAiUndo()
             try this.Editor.Destroy()
@@ -2250,8 +2285,82 @@ class PhraseBoardApp {
         aiCheck.Value := IsObject(item) && HasProp(item, "AiPhrase") && item.AiPhrase
         e.AddText("xm w560", "Checking this box allows Generate, Improve, and {{ai}} to send text. There is no extra prompt.")
         e.AddText("xm", "Phrase Body")
-        insertMacroBtn := e.AddButton("x+290 yp-4 w150 h26", "+ Insert Macro...")
-        body := e.AddEdit("xm w560 r12 WantTab vBody", IsObject(item) ? item.Text : initialText)
+        richCheck := e.AddCheckbox("x+12 yp", "Rich text (formatted)")
+        hasInitialRtf := (IsObject(item) && HasProp(item, "Rtf") && item.Rtf != "") || (initialRtf != "")
+        richCheck.Value := hasInitialRtf
+        insertMacroBtn := e.AddButton("x+100 yp-4 w140 h26", "+ Insert Macro...")
+
+        boldBtn := e.AddButton("xm yp+30 w32 h24", "B")
+        boldBtn.SetFont("bold")
+        italicBtn := e.AddButton("x+4 yp w32 h24", "I")
+        italicBtn.SetFont("italic")
+        underlineBtn := e.AddButton("x+4 yp w32 h24", "U")
+        underlineBtn.SetFont("underline")
+        strikeBtn := e.AddButton("x+4 yp w32 h24", "S")
+        strikeBtn.SetFont("strike")
+        bulletBtn := e.AddButton("x+4 yp w50 h24", "• List")
+        colorBtn := e.AddButton("x+4 yp w56 h24", "Color")
+        clearBtn := e.AddButton("x+4 yp w50 h24", "Clear")
+        e.SetFont("s10", "Segoe UI")
+
+        colorMenu := Menu()
+        colorMenu.Add("Black", (*) => (richBody.Focus(), RichText.SetColor(richBody.Hwnd, 0x000000)))
+        colorMenu.Add("Blue", (*) => (richBody.Focus(), RichText.SetColor(richBody.Hwnd, 0xD02000)))
+        colorMenu.Add("Red", (*) => (richBody.Focus(), RichText.SetColor(richBody.Hwnd, 0x0000D0)))
+        colorMenu.Add("Green", (*) => (richBody.Focus(), RichText.SetColor(richBody.Hwnd, 0x008000)))
+        colorMenu.Add("Purple", (*) => (richBody.Focus(), RichText.SetColor(richBody.Hwnd, 0x800080)))
+        colorMenu.Add("Orange", (*) => (richBody.Focus(), RichText.SetColor(richBody.Hwnd, 0x0080FF)))
+        colorMenu.Add("Gray", (*) => (richBody.Focus(), RichText.SetColor(richBody.Hwnd, 0x707070)))
+        colorBtn.OnEvent("Click", (*) => colorMenu.Show())
+
+        body := e.AddEdit("xm yp+30 w560 r12 WantTab vBody", IsObject(item) ? item.Text : initialText)
+        body.GetPos(&bx, &by, &bw, &bh)
+        richBody := e.AddCustom("ClassRICHEDIT50W x" bx " y" by " w" bw " h" bh " +0x4 +0x1000 +0x10000")
+
+        startingRtf := (IsObject(item) && HasProp(item, "Rtf") && item.Rtf != "") ? item.Rtf : initialRtf
+        if startingRtf
+            RichText.SetRtf(richBody.Hwnd, IsObject(item) ? item.Text : initialText, startingRtf)
+        else
+            ControlSetText(IsObject(item) ? item.Text : initialText, richBody)
+
+        SyncRichControls(*) {
+            isRich := !!richCheck.Value
+            for btn in [boldBtn, italicBtn, underlineBtn, strikeBtn, bulletBtn, colorBtn, clearBtn]
+                btn.Enabled := isRich
+            if isRich {
+                if body.Visible {
+                    ControlSetText(body.Value, richBody)
+                    body.Visible := false
+                    richBody.Visible := true
+                    richBody.Focus()
+                }
+            } else {
+                if richBody.Visible {
+                    body.Value := ControlGetText(richBody)
+                    richBody.Visible := false
+                    body.Visible := true
+                    body.Focus()
+                }
+            }
+        }
+        richCheck.OnEvent("Click", SyncRichControls)
+
+        boldBtn.OnEvent("Click", (*) => (richBody.Focus(), RichText.ToggleBold(richBody.Hwnd), NoteBodyChange()))
+        italicBtn.OnEvent("Click", (*) => (richBody.Focus(), RichText.ToggleItalic(richBody.Hwnd), NoteBodyChange()))
+        underlineBtn.OnEvent("Click", (*) => (richBody.Focus(), RichText.ToggleUnderline(richBody.Hwnd), NoteBodyChange()))
+        strikeBtn.OnEvent("Click", (*) => (richBody.Focus(), RichText.ToggleStrikeout(richBody.Hwnd), NoteBodyChange()))
+        bulletBtn.OnEvent("Click", (*) => (richBody.Focus(), RichText.ToggleBullet(richBody.Hwnd), NoteBodyChange()))
+        clearBtn.OnEvent("Click", (*) => (richBody.Focus(), RichText.ClearFormatting(richBody.Hwnd), NoteBodyChange()))
+
+        if hasInitialRtf {
+            body.Visible := false
+            richBody.Visible := true
+        } else {
+            richBody.Visible := false
+            body.Visible := true
+            for btn in [boldBtn, italicBtn, underlineBtn, strikeBtn, bulletBtn, colorBtn, clearBtn]
+                btn.Enabled := false
+        }
         macroMenu := Menu()
         macroMenu.Add("Date (YYYY-MM-DD)", (*) => InsertMacroText("{{date}}"))
         macroMenu.Add("Date (Custom format)", (*) => InsertMacroText("{{date:format=yyyy-MM-dd}}"))
@@ -2274,8 +2383,10 @@ class PhraseBoardApp {
             macroMenu.Disable("AI instruction")
 
         InsertMacroText(str) {
-            body.Focus()
-            DllCall("user32\SendMessageW", "Ptr", body.Hwnd, "UInt", 0xC2, "Ptr", 1, "WStr", str)
+            targetCtrl := richCheck.Value ? richBody : body
+            targetCtrl.Focus()
+            DllCall("user32\SendMessageW", "Ptr", targetCtrl.Hwnd, "UInt", 0xC2, "Ptr", 1, "WStr", str)
+            NoteBodyChange()
         }
         triggerText.OnEvent("Change", (*) => UpdateTriggerWarnings())
         body.OnEvent("Change", NoteBodyChange)
@@ -2287,9 +2398,9 @@ class PhraseBoardApp {
         generateButton.Enabled := aiCheck.Value
         improveButton.Enabled := aiCheck.Value
         aiCheck.OnEvent("Click", SyncAiControls)
-        generateButton.OnEvent("Click", (*) => this.GeneratePhraseDraft(name, body, errorLabel))
-        improveButton.OnEvent("Click", (*) => this.ImprovePhraseSelection(body, errorLabel))
-        previewButton.OnEvent("Click", (*) => this.PreviewTemplate(body.Value, aiCheck.Value))
+        generateButton.OnEvent("Click", (*) => this.GeneratePhraseDraft(name, richCheck.Value ? richBody : body, errorLabel))
+        improveButton.OnEvent("Click", (*) => this.ImprovePhraseSelection(richCheck.Value ? richBody : body, errorLabel))
+        previewButton.OnEvent("Click", (*) => this.PreviewTemplate(richCheck.Value ? ControlGetText(richBody) : body.Value, aiCheck.Value))
         saveButton := e.AddButton("xm w130 Default vSavePhrase", "Save phrase")
         saveButton.OnEvent("Click", SavePhraseClick)
         e.AddButton("x+10 w100", "Cancel").OnEvent("Click", (*) => this.ClosePhraseEditor(e))
@@ -2322,8 +2433,10 @@ class PhraseBoardApp {
                 priorAbbr := IsObject(item) ? item.Abbr : ""
                 if Trim(abbr.Value) != priorAbbr
                     editedAbbr := Trim(abbr.Value)
-                this.UpsertPhrase(name.Value, editedAbbr, body.Value, IsObject(item) ? item.Id : "",
-                    tags.Value, apps.Value, chosenFolder, editedTriggers, aiCheck.Value)
+                saveText := richCheck.Value ? ControlGetText(richBody) : body.Value
+                saveRtf := richCheck.Value ? RichText.GetRtf(richBody.Hwnd) : ""
+                this.UpsertPhrase(name.Value, editedAbbr, saveText, IsObject(item) ? item.Id : "",
+                    tags.Value, apps.Value, chosenFolder, editedTriggers, aiCheck.Value, saveRtf)
                 this.RefreshFolderChoices()
                 this.ClosePhraseEditor(e)
             } catch as err {
@@ -2348,11 +2461,12 @@ class PhraseBoardApp {
                     otherPhrases.Push(candidate)
             draft := {Id: IsObject(item) ? item.Id : "draft", Triggers: draftTriggers}
             otherPhrases.Push(draft)
+            currentBodyText := richCheck.Value ? ControlGetText(richBody) : body.Value
             for trigger in draftTriggers
                 if trigger.Kind = "Autotext" {
                     for warning in TriggerEngine.ConflictWarnings(trigger, otherPhrases)
                         warnings.Push(warning)
-                    for warning in TriggerEngine.SmartCaseWarnings(trigger, body.Value, otherPhrases)
+                    for warning in TriggerEngine.SmartCaseWarnings(trigger, currentBodyText, otherPhrases)
                         warnings.Push(warning)
                 }
             warningLabel.Text := warnings.Length ? "Warning: " FolderTree.Join(warnings, " ") : ""

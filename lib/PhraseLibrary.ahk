@@ -53,16 +53,21 @@ class PhraseLibrary {
             fields := StrSplit(line, "`t")
             tag := fields[1]
             counts := Map("P", version = "PB4" ? 10 : 9, "F", 5, "T", 8, "O", 5)
-            if !counts.Has(tag) || fields.Length != counts[tag]
+            if tag = "P" && version = "PB4" {
+                if fields.Length != 10 && fields.Length != 11
+                    throw Error("Invalid " version " " tag " record column count.")
+            } else if !counts.Has(tag) || fields.Length != counts[tag]
                 throw Error("Invalid " version " " tag " record column count.")
             decoded := [tag]
             Loop fields.Length - 1
                 decoded.Push(SecureStore.Decode(fields[A_Index + 1], true))
             if tag = "P" {
+                rtf := (version = "PB4" && decoded.Length >= 11) ? decoded[11] : ""
                 p := PhraseModel.NormalizePhrase({Id: decoded[2], Name: decoded[3], Text: decoded[4],
                     Tags: decoded[5], Favorite: this.ParseBit(decoded[6]), Uses: this.ParseInteger(decoded[7]),
                     Apps: decoded[8], FolderId: decoded[9],
-                    AiPhrase: version = "PB4" ? this.ParseBit(decoded[10]) : false, Triggers: []})
+                    AiPhrase: version = "PB4" ? this.ParseBit(decoded[10]) : false,
+                    Rtf: rtf, Triggers: []})
                 this.RegisterId(ids, p.Id, "phrase")
                 phrases.Push(p)
             } else if tag = "F" {
@@ -147,7 +152,7 @@ class PhraseLibrary {
         output := "PB4`n"
         for p in normalizedPhrases {
             output .= this.Row("P", [p.Id, p.Name, p.Text, p.Tags, p.Favorite ? "1" : "0",
-                p.Uses, p.Apps, p.FolderId, p.AiPhrase ? "1" : "0"])
+                p.Uses, p.Apps, p.FolderId, p.AiPhrase ? "1" : "0", p.Rtf])
         }
         for f in normalizedFolders
             output .= this.Row("F", [f.Id, f.ParentId, f.Name, f.CreatedAt])

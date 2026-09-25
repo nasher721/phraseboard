@@ -117,10 +117,12 @@ try {
         DllCall("user32\AttachThreadInput", "UInt", curThread, "UInt", foreThread, "Int", 1)
     DllCall("user32\SetForegroundWindow", "Ptr", host.Hwnd)
     DllCall("user32\BringWindowToTop", "Ptr", host.Hwnd)
+    DllCall("user32\SetActiveWindow", "Ptr", host.Hwnd)
     WinActivate("ahk_id " host.Hwnd)
     if foreThread && foreThread != curThread
         DllCall("user32\AttachThreadInput", "UInt", curThread, "UInt", foreThread, "Int", 0)
     inputCtrl.Focus()
+    Sleep(250)
 
     app.WriteClipboard("Previous clipboard")
     app.PasteValue("Plain " Chr(0x03A9) "`nline two", host.Hwnd)
@@ -137,13 +139,70 @@ try {
     Assert(NumGet(clipFormat, 8, "UInt") & 1, "RichEdit receives bold formatting")
 
     inputCtrl.Value := ""
-    WinActivate("ahk_id " host.Hwnd)
+    DllCall("user32\SetActiveWindow", "Ptr", host.Hwnd)
+    DllCall("user32\SetFocus", "Ptr", inputCtrl.Hwnd)
+    SendMessage(0x0007, 0, 0, , "ahk_id " inputCtrl.Hwnd)
     inputCtrl.Focus()
+    Sleep(150)
     app.Target := host.Hwnd
     app.WriteClipboard(savedRich.Data)
-    app.PasteCurrentPlain()
+    app.PasteCurrentPlain(host.Hwnd)
     Assert(inputCtrl.Value = "Bold sample", "Plain-paste shortcut path strips RTF")
     Assert(GetRtf() != "", "Plain paste restores original rich clipboard")
+
+    Assert(RichText.EscapeRtf("Hello {world}") = "Hello \{world\}", "RichText.EscapeRtf escapes braces")
+    Assert(InStr(RichText.RtfFromPlainText("Line 1`nLine 2"), "\par"), "RtfFromPlainText produces RTF with par")
+    Assert(RichText.ExtractRtfFromClip(savedRich.Data) = "{\rtf1\ansi\b Bold sample\b0}", "RichText.ExtractRtfFromClip extracts RTF from clipboard data")
+    resolvedRich := RichText.ResolveRichMacros("{\rtf1\ansi\b Hello \{\{date\}\}\b0}", (token) => app.ResolveTokens(token))
+    Assert(InStr(resolvedRich, FormatTime(, "yyyy-MM-dd")), "RichText.ResolveRichMacros replaces macro tokens in RTF")
+
+    richPhrase := app.UpsertPhrase("Rich Signature", ";pbrich", "Rich bold text", , , , , , , "{\rtf1\ansi\b Rich bold text\b0}")
+    Assert(richPhrase.Format = "rich" && richPhrase.Rtf != "", "UpsertPhrase creates rich phrase")
+    for idx, phr in app.PhraseRows {
+        if phr.Id = richPhrase.Id {
+            app.PhraseList.Modify(0, "-Select")
+            app.PhraseList.Modify(idx, "Select")
+            break
+        }
+    }
+    app.Target := host.Hwnd
+    DllCall("user32\SetActiveWindow", "Ptr", host.Hwnd)
+    DllCall("user32\SetFocus", "Ptr", richEdit.Hwnd)
+    SendMessage(0x0007, 0, 0, , "ahk_id " richEdit.Hwnd)
+    ControlSetText("", richEdit)
+    richEdit.Focus()
+    Sleep(100)
+    app.PastePhrase(false)
+    Sleep(150)
+    Assert(InStr(ControlGetText(richEdit), "Rich bold text"), "Formatted phrase paste reaches RichEdit")
+    SendMessage(0xB1, 0, 4, richEdit) ; EM_SETSEL
+    rfFormat := Buffer(116, 0)
+    NumPut("UInt", 116, rfFormat)
+    SendMessage(0x43A, 1, rfFormat.Ptr, richEdit) ; EM_GETCHARFORMAT, SCF_SELECTION
+    Assert(NumGet(rfFormat, 8, "UInt") & 1, "RichEdit receives bold formatting from rich phrase")
+
+    DllCall("user32\SetActiveWindow", "Ptr", host.Hwnd)
+    DllCall("user32\SetFocus", "Ptr", inputCtrl.Hwnd)
+    SendMessage(0x0007, 0, 0, , "ahk_id " inputCtrl.Hwnd)
+    inputCtrl.Value := ""
+    inputCtrl.Focus()
+    Sleep(100)
+    app.Target := host.Hwnd
+    app.PastePhrase(true)
+    Sleep(150)
+    Assert(inputCtrl.Value = "Rich bold text", "PastePhrase(true) pastes plain text into edit control")
+
+    for idx, phr in app.Phrases {
+        if phr.Id = richPhrase.Id {
+            app.Phrases.RemoveAt(idx)
+            break
+        }
+    }
+    app.SavePhrases()
+    app.RegisterPhrases()
+    app.RefreshPhrases()
+    if app.PhraseRows.Length
+        app.PhraseList.Modify(1, "Select Focus")
 
     inputCtrl.Value := ""
     inputCtrl.Focus()
@@ -384,9 +443,17 @@ SetRichClipboard(text, rtf) {
     } finally DllCall("CloseClipboard")
     return ClipboardAll()
 }
-GetRtf() {
+GetRtf(retries := 10) {
     clipFormat := DllCall("RegisterClipboardFormat", "Str", "Rich Text Format", "UInt")
-    if !DllCall("OpenClipboard", "Ptr", A_ScriptHwnd)
+    opened := false
+    Loop retries {
+        if DllCall("OpenClipboard", "Ptr", A_ScriptHwnd) {
+            opened := true
+            break
+        }
+        Sleep(25)
+    }
+    if !opened
         throw OSError()
     try {
         handle := DllCall("GetClipboardData", "UInt", clipFormat, "Ptr")

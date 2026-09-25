@@ -432,6 +432,28 @@ try {
         cycleRejectedOnSave := true
     Assert(cycleRejectedOnSave && store.Read("phrases.dat") = original,
         "folder cycles are rejected before the encrypted library is overwritten")
+
+    plainNorm := PhraseModel.NormalizePhrase({Id: "norm-plain", Name: "Plain", Text: "Just text"})
+    Assert(plainNorm.Rtf = "" && plainNorm.Format = "text", "plain phrase normalizes with text format and blank RTF")
+
+    sampleRtf := "{\rtf1\ansi\deff0 {\fonttbl {\f0 Segoe UI;}}\f0\fs24 Hello \b Rich\b0!}"
+    richNorm := PhraseModel.NormalizePhrase({Id: "norm-rich", Name: "Rich", Text: "Hello Rich!", Rtf: sampleRtf})
+    Assert(richNorm.Rtf = sampleRtf && richNorm.Format = "rich", "rich phrase normalizes with rich format and RTF content")
+
+    oversizedRtf := "{\rtf1 "
+    Loop 50001
+        oversizedRtf .= "1234567890"
+    oversizedRejected := false
+    try PhraseModel.ValidatePhrase({Id: "oversized", Name: "Over", Text: "text", Rtf: oversizedRtf})
+    catch as err
+        oversizedRejected := InStr(err.Message, "500,000") > 0
+    Assert(oversizedRejected, "oversized formatted phrase is rejected on validation")
+
+    PhraseLibrary.Save(store, [richNorm], [])
+    richReloaded := PhraseLibrary.Load(store)
+    Assert(richReloaded.Phrases.Length = 1 && richReloaded.Phrases[1].Rtf = sampleRtf
+        && richReloaded.Phrases[1].Format = "rich" && richReloaded.Phrases[1].Text = "Hello Rich!",
+        "PB4 round-trips rich formatted text phrases")
 } finally {
     if DirExist(dataDir)
         DirDelete(dataDir, true)

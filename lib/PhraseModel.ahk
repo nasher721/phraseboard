@@ -36,6 +36,8 @@ class PhraseModel {
             Name: this.StringField(record, "Name"),
             Abbr: this.StringField(record, "Abbr"),
             Text: this.StringField(record, "Text"),
+            Rtf: this.StringField(record, "Rtf"),
+            Format: (HasProp(record, "Format") && record.Format = "rich") || (HasProp(record, "Rtf") && record.Rtf != "") ? "rich" : "text",
             Tags: this.StringField(record, "Tags"),
             Favorite: HasProp(record, "Favorite") && !!record.Favorite,
             Uses: HasProp(record, "Uses") ? Integer(record.Uses) : 0,
@@ -52,6 +54,8 @@ class PhraseModel {
             throw Error("Enter a phrase name and its text.")
         if StrLen(phrase.Text) > 100000
             throw Error("Keep each phrase under 100,000 characters.")
+        if phrase.Rtf && StrLen(phrase.Rtf) > 500000
+            throw Error("Keep each formatted phrase under 500,000 characters.")
         if this.HasBlankAiMacro(phrase.Text)
             throw Error("AI macro requires an instruction.")
         if this.ContainsAiMacro(phrase.Text) && !phrase.AiPhrase
