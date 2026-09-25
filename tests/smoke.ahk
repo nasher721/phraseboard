@@ -31,6 +31,9 @@ try {
         || !parsed[2].Options["RemoveTerminator"] || parsed[2].Options["MinChars"] != 2
         || parsed[2].Options["BeforeChars"] != " #9"
         throw Error("Autotext trigger options did not round-trip through the editor.")
+    app.EnsureTypingMonitor()
+    app.TypedKeyDown(app.TypingHook, 0x41, 0x1E)
+    app.TypedCharacter(app.TypingHook, "a")
     app.Stop()
     FileAppend("STARTUP TESTS PASSED`n", "*")
 } catch as err {

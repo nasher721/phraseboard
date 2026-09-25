@@ -48,6 +48,12 @@ class PhraseBoardApp {
     TypedBuffer := ""
     LastInputTick := 0
     LastInputGap := 0
+    PendingTrigger := 0
+    PendingTimer := 0
+    TypingHook := 0
+    MonitoringStopped := false
+    SmartPopupGui := 0
+    SmartPopupList := 0
     AiKey := ""
     ExpansionAborted := false
     ExpansionError := ""
@@ -464,8 +470,7 @@ class PhraseBoardApp {
         this.LastInputTick := timestamp
         this.TypingRate.Record(timestamp)
         key := GetKeyName(Format("vk{:x}sc{:x}", vk, sc))
-        if IsObject(this.PendingTrigger)
-            this.CancelPendingTrigger()
+        this.CancelPendingTrigger()
         if key = "Backspace" {
             if StrLen(this.TypedBuffer)
                 this.TypedBuffer := SubStr(this.TypedBuffer, 1, -1)
