@@ -39,8 +39,11 @@ class AiSettings {
         normalized := this.Normalize(settings)
         if !HasProp(settings, "Provider") || (settings.Provider != "Ollama" && settings.Provider != "OpenAICompatible")
             throw Error("Choose Ollama or an OpenAI-compatible provider.")
-        if !this.IsHttpUrl(HasProp(settings, "Endpoint") ? settings.Endpoint : "")
+        endpoint := HasProp(settings, "Endpoint") ? settings.Endpoint : ""
+        if !this.IsHttpUrl(endpoint)
             throw Error("Enter an http or https endpoint.")
+        if settings.Provider = "OpenAICompatible" && !this.KeyTransportAllowed(settings.Provider, endpoint)
+            throw Error("OpenAI-compatible endpoints must use https, except on localhost.")
         if !HasProp(settings, "Temperature") || !this.IsTemperature(settings.Temperature)
             throw Error("Temperature must be from 0 through 2.")
         if !HasProp(settings, "MaxTokens") || !this.IsTokens(settings.MaxTokens)
@@ -52,6 +55,31 @@ class AiSettings {
 
     static IsHttpUrl(value) {
         return !!RegExMatch(Trim(value), "i)^https?://\S+$")
+    }
+
+    static KeyTransportAllowed(provider, endpoint) {
+        if provider != "OpenAICompatible"
+            return true
+        endpoint := Trim(endpoint)
+        if RegExMatch(endpoint, "i)^https://\S+$")
+            return true
+        return !!RegExMatch(endpoint, "i)^http://(\[::1\]|localhost|127\.0\.0\.1)(:\d+)?(/.*)?$")
+    }
+
+    static Host(endpoint) {
+        if !RegExMatch(Trim(endpoint), "i)^https?://([^/?#]+)", &match)
+            return ""
+        return StrLower(match[1])
+    }
+
+    static SameKeyTarget(next, current) {
+        if !IsObject(next) || !IsObject(current)
+            return false
+        if !HasProp(next, "Provider") || !HasProp(current, "Provider")
+            return false
+        if next.Provider != current.Provider
+            return false
+        return this.Host(next.Endpoint) = this.Host(current.Endpoint)
     }
 
     static IsTemperature(value) {

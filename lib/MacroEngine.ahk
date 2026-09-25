@@ -292,6 +292,7 @@ class MacroEngine {
         childContext := this.CloneContext(context)
         childContext.RecursionDepth := context.RecursionDepth + 1
         childContext.PhraseStack.Push(targetPhrase.Id)
+        ; The embedded phrase's own checkbox is the consent. The outer phrase does not have to be checked.
         childContext.CurrentAiPhrase := HasProp(targetPhrase, "AiPhrase") && !!targetPhrase.AiPhrase
 
         childResult := this.Render(targetPhrase.Text, childContext)
@@ -299,6 +300,8 @@ class MacroEngine {
             context.Cancelled := true
             if childResult.AiAborted
                 context.AiAborted := true
+            if childResult.Errors.Length
+                context.Errors.Push(childResult.Errors[1])
             return ""
         }
         return childResult.Text
@@ -396,17 +399,28 @@ class MacroEngine {
                 elseText := node.ParamMap["else"]
         }
 
-        ; Resolve nested macros in val1 and val2
-        if InStr(val1, "{{")
-            val1 := this.Render(val1, context).Text
-        if InStr(val2, "{{")
-            val2 := this.Render(val2, context).Text
+        if InStr(val1, "{{") {
+            rendered := this.Render(val1, context)
+            if context.Cancelled
+                return ""
+            val1 := rendered.Text
+        }
+        if InStr(val2, "{{") {
+            rendered := this.Render(val2, context)
+            if context.Cancelled
+                return ""
+            val2 := rendered.Text
+        }
 
         isMatch := (StrLower(Trim(val1)) = StrLower(Trim(val2)))
         chosen := isMatch ? thenText : elseText
 
-        if InStr(chosen, "{{")
-            return this.Render(chosen, context).Text
+        if InStr(chosen, "{{") {
+            rendered := this.Render(chosen, context)
+            if context.Cancelled
+                return ""
+            return rendered.Text
+        }
         return chosen
     }
 
@@ -626,22 +640,17 @@ class MacroEngine {
     }
 
     static EvalAi(node, context) {
+        if context.Cancelled
+            return ""
         if !HasProp(context, "CurrentAiPhrase") || !context.CurrentAiPhrase
             return this.FailAi(context, "AI phrase is off.")
         if context.RecursionDepth >= this.MaxRecursionDepth
             return this.FailAi(context, "AI call exceeded the macro depth limit.")
         context.RecursionDepth += 1
         try {
-            instruction := ""
-            input := ""
-            if node.ParamMap.Has("instruction")
-                instruction := node.ParamMap["instruction"]
-            else if node.Params.Length
-                instruction := node.Params[1].Key = "" ? node.Params[1].Value : node.Params[1].Value
-            if node.ParamMap.Has("input")
-                input := node.ParamMap["input"]
-            else if node.Params.Length >= 2
-                input := node.Params[2].Value
+            parts := MacroParser.AiInstructionAndInput(node.Raw)
+            instruction := parts.Instruction
+            input := parts.Input
             instruction := this.ResolveNested(instruction, context)
             if context.Cancelled
                 return ""

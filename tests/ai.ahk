@@ -146,6 +146,63 @@ embedResult := MacroEngine.Render("{{phrase:Inner}}", embed)
 Assert(embedResult.Text = "from-inner" && inner.Requests.Length = 1,
     "an embedded AI phrase uses its own checkbox")
 
+comma := FakeAi("ECHO")
+commaCtx := MacroEngine.NewContext()
+commaCtx.CurrentAiPhrase := true
+commaCtx.ClipboardText := "copied text"
+commaCtx.AiGenerate := comma
+commaResult := MacroEngine.Render("{{ai:Shorten, keep meaning|{{clipboard}}}}", commaCtx)
+Assert(commaResult.Text = "OUT:copied text" && comma.Requests.Length = 1
+    && comma.Requests[1].Instruction = "Shorten, keep meaning",
+    "a comma inside an AI instruction is not a separator")
+
+tone := FakeAi("ok")
+toneCtx := MacroEngine.NewContext()
+toneCtx.CurrentAiPhrase := true
+toneCtx.AiGenerate := tone
+toneResult := MacroEngine.Render("{{ai:Rewrite so tone=formal}}", toneCtx)
+Assert(toneResult.Text = "ok" && tone.Requests[1].Instruction = "Rewrite so tone=formal",
+    "an equals sign inside an AI instruction is kept")
+
+branch := FakeAi("FAIL")
+branchCtx := MacroEngine.NewContext()
+branchCtx.CurrentAiPhrase := true
+branchCtx.AiGenerate := branch
+branchResult := MacroEngine.Render("{{if:{{ai:A}},x,{{ai:B}}}}", branchCtx)
+Assert(branchResult.AiAborted && branchResult.Text = "" && branch.Requests.Length = 1,
+    "a failed AI call does not send the other branch")
+
+plainHttp := false
+try AiSettings.Validate({
+    Provider: "OpenAICompatible", Endpoint: "http://example.com/v1", Model: "m",
+    Temperature: "0.2", MaxTokens: "128", TimeoutSec: "30"
+})
+catch
+    plainHttp := true
+Assert(plainHttp, "a remote OpenAI-compatible endpoint must use https")
+loopback := AiSettings.Validate({
+    Provider: "OpenAICompatible", Endpoint: "http://127.0.0.1:8080/v1", Model: "m",
+    Temperature: "0.2", MaxTokens: "128", TimeoutSec: "30"
+})
+Assert(loopback.Endpoint = "http://127.0.0.1:8080/v1", "loopback http is allowed for an API key")
+blocked := FakeTransport(200, Json.Encode(Map("choices", [Map("message", Map("content", "secret"))])))
+insecure := AiSettings.Normalize({Provider: "OpenAICompatible", Endpoint: "http://example.com/v1", Model: "m"})
+denied := AiService.Generate({Kind: "macro", Instruction: "Hi", Input: "phrase body"}, insecure, sentinel, blocked)
+Assert(!denied.Ok && blocked.Calls.Length = 0 && !InStr(denied.Error, "phrase body"),
+    "plain http does not send the API key or the phrase")
+
+controlTransport := FakeTransport(200, Json.Encode(Map("message", Map("content", "a" Chr(1) "b`nc"))))
+controlResult := AiService.Generate({Kind: "macro", Instruction: "Hi", Input: ""}, settings, "", controlTransport)
+Assert(controlResult.Ok && controlResult.Text = "ab`nc", "replies drop control characters other than tab and newline")
+Assert(WinHttpTransport.TransportError("The operation timed out") = "The AI request timed out.",
+    "WinHttp timeout text is reported as a timeout")
+
+keptBody := AiWorkflows.ParseGenerated("NAME: Note`nBODY:`nFirst`nBODY: still body")
+Assert(keptBody.Name = "Note" && keptBody.Body = "First`nBODY: still body",
+    "a later BODY label stays in the generated body")
+Assert(AiWorkflows.ValueOffset("a`r`nb", 4) = 3 && AiWorkflows.ValueOffset("a`r`nb", 3) = 2,
+    "edit selection offsets drop the extra CR")
+
 Assert(AiWorkflows.ApplyReplacement("Hello", 1, 4, "X") = "HXo", "improve replaces only the selection")
 Assert(AiWorkflows.ApplyReplacement("Hello", 0, 5, "Bye") = "Bye", "improve can replace the whole body")
 generated := AiWorkflows.ParseGenerated("NAME: Sign`nBODY:`nKind regards")

@@ -50,6 +50,7 @@ class PhraseBoardApp {
     LastInputGap := 0
     AiKey := ""
     ExpansionAborted := false
+    ExpansionError := ""
     AiUndoArmed := false
     ApplyingAi := false
     AiUndoHotkeyOn := false
@@ -718,16 +719,21 @@ class PhraseBoardApp {
                 expandedSource := IsObject(trigger)
                     ? TriggerEngine.ApplyCase(inputMatch ? inputMatch : triggerValue, p.Text, trigger, this.Phrases)
                     : p.Text
-                priorClip := ClipboardAll()
                 this.ExpansionAborted := false
+                this.ExpansionError := ""
                 expanded := this.ResolveTokens(expandedSource, p)
                 if expanded = "" {
                     if this.ExpansionAborted {
-                        try A_Clipboard := priorClip
+                        this.ReportExpansionAbort()
                         return
                     }
                     if triggerValue
                         SendText(triggerValue endChar)
+                    return
+                }
+                if targetHwnd && !WinActive("ahk_id " targetHwnd) {
+                    this.Notify("Target window changed. Nothing was pasted.")
+                    TrayTip("Target window changed. Nothing was pasted.", "PhraseBoard")
                     return
                 }
                 p.Uses += 1
@@ -755,6 +761,9 @@ class PhraseBoardApp {
         res := MacroEngine.Render(text, ctx)
         if res.Cancelled {
             this.ExpansionAborted := this.ResultIsAiAbort(res)
+            this.ExpansionError := ""
+            if this.ExpansionAborted && res.Errors.Length
+                this.ExpansionError := res.Errors[1].Message
             return ""
         }
         for act in res.PostActions {
@@ -785,6 +794,11 @@ class PhraseBoardApp {
     }
     ResultIsAiAbort(res) {
         return HasProp(res, "AiAborted") && res.AiAborted
+    }
+    ReportExpansionAbort() {
+        message := this.ExpansionError ? this.ExpansionError : "Nothing was pasted."
+        this.Notify(message)
+        TrayTip(message, "PhraseBoard")
     }
     PreviewTemplate(text, aiPhrase := false) {
         ctx := MacroEngine.NewContext()
@@ -1026,9 +1040,14 @@ class PhraseBoardApp {
                 this.Notify("This phrase is limited to other apps.")
                 return
             }
-            value := this.ResolveTokens(p.Text)
-            if value = ""
+            this.ExpansionAborted := false
+            this.ExpansionError := ""
+            value := this.ResolveTokens(p.Text, p)
+            if value = "" {
+                if this.ExpansionAborted
+                    this.ReportExpansionAbort()
                 return
+            }
             value := this.ExtractCursor(value)
             p.Uses += 1
             try this.SavePhrases()
@@ -1981,7 +2000,7 @@ class PhraseBoardApp {
             TimeoutSec: this.AiTimeoutEdit.Value
         })
         key := Trim(this.AiKeyEdit.Value)
-        if key = ""
+        if key = "" && AiSettings.SameKeyTarget(settings, this.AiSettings)
             key := this.AiKey
         return {Settings: settings, Key: key}
     }
@@ -2018,20 +2037,28 @@ class PhraseBoardApp {
         this.SetAiUndoHotkey(false)
     }
     ClearAiUndo(*) {
+        this.SetAiUndoHotkey(false)
         this.AiUndo := []
         this.AiUndoArmed := false
-        this.SetAiUndoHotkey(false)
         this.AiEditorHwnd := 0
+    }
+    ClosePhraseEditor(editor) {
+        this.ClearAiUndo()
+        try editor.Destroy()
     }
     SetAiUndoHotkey(enabled) {
         if !this.AiEditorHwnd
             return
         HotIfWinActive("ahk_id " this.AiEditorHwnd)
-        if enabled && !this.AiUndoHotkeyOn {
-            Hotkey("^z", ObjBindMethod(this, "UndoAiEdit"), "On")
-            this.AiUndoHotkeyOn := true
-        } else if !enabled && this.AiUndoHotkeyOn {
-            Hotkey("^z", "Off")
+        try {
+            if enabled && !this.AiUndoHotkeyOn {
+                Hotkey("^z", ObjBindMethod(this, "UndoAiEdit"), "On")
+                this.AiUndoHotkeyOn := true
+            } else if !enabled && this.AiUndoHotkeyOn {
+                Hotkey("^z", "Off")
+                this.AiUndoHotkeyOn := false
+            }
+        } catch {
             this.AiUndoHotkeyOn := false
         }
         HotIfWinActive()
@@ -2060,6 +2087,14 @@ class PhraseBoardApp {
         end := 0
         DllCall("SendMessage", "Ptr", edit.Hwnd, "UInt", 0xB0, "UInt*", &start, "UInt*", &end)
         return {Start: start, End: end}
+    }
+    EditRawText(edit) {
+        length := DllCall("SendMessage", "Ptr", edit.Hwnd, "UInt", 0x000E, "Ptr", 0, "Ptr", 0, "Ptr")
+        if length < 0
+            length := 0
+        buf := Buffer((length + 1) * 2, 0)
+        DllCall("SendMessage", "Ptr", edit.Hwnd, "UInt", 0x000D, "Ptr", length + 1, "Ptr", buf)
+        return StrGet(buf, length, "UTF-16")
     }
     AskText(title, label) {
         holder := {Accepted: false, Result: ""}
@@ -2150,9 +2185,10 @@ class PhraseBoardApp {
         }
         sel := this.EditSelection(body)
         whole := sel.Start = sel.End
-        source := whole ? body.Value : SubStr(body.Value, sel.Start + 1, sel.End - sel.Start)
-        start := whole ? 0 : sel.Start
-        end := whole ? StrLen(body.Value) : sel.End
+        raw := this.EditRawText(body)
+        start := whole ? 0 : AiWorkflows.ValueOffset(raw, sel.Start)
+        end := whole ? StrLen(body.Value) : AiWorkflows.ValueOffset(raw, sel.End)
+        source := whole ? body.Value : SubStr(body.Value, start + 1, end - start)
         result := AiService.Generate({Kind: "improve", Instruction: instruction, Input: source},
             this.AiSettings, this.AiKey, WinHttpTransport)
         if !result.Ok {
@@ -2169,6 +2205,7 @@ class PhraseBoardApp {
     }
     EditPhrase(item := 0, initialText := "", folderId := "") {
         if HasProp(this, "Editor") {
+            this.ClearAiUndo()
             try this.Editor.Destroy()
         }
         e := this.Editor := Gui("+Owner" this.Window.Hwnd, IsObject(item) ? "Edit phrase" : "New phrase")
@@ -2250,9 +2287,9 @@ class PhraseBoardApp {
         previewButton.OnEvent("Click", (*) => this.PreviewTemplate(body.Value, aiCheck.Value))
         saveButton := e.AddButton("xm w130 Default vSavePhrase", "Save phrase")
         saveButton.OnEvent("Click", SavePhraseClick)
-        e.AddButton("x+10 w100", "Cancel").OnEvent("Click", (*) => e.Destroy())
-        e.OnEvent("Escape", (*) => e.Destroy())
-        e.OnEvent("Close", (*) => this.ClearAiUndo())
+        e.AddButton("x+10 w100", "Cancel").OnEvent("Click", (*) => this.ClosePhraseEditor(e))
+        e.OnEvent("Escape", (*) => this.ClosePhraseEditor(e))
+        e.OnEvent("Close", (*) => this.ClosePhraseEditor(e))
         this.AiUndo := []
         this.AiEditorHwnd := e.Hwnd
         this.AiEditorName := name
@@ -2283,7 +2320,7 @@ class PhraseBoardApp {
                 this.UpsertPhrase(name.Value, editedAbbr, body.Value, IsObject(item) ? item.Id : "",
                     tags.Value, apps.Value, chosenFolder, editedTriggers, aiCheck.Value)
                 this.RefreshFolderChoices()
-                e.Destroy()
+                this.ClosePhraseEditor(e)
             } catch as err {
                 errorLabel.Text := err.Message
             }

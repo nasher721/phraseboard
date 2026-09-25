@@ -74,11 +74,7 @@ class PhraseModel {
             if node.Type != "Macro"
                 continue
             if node.Name = "ai" {
-                instruction := ""
-                if node.ParamMap.Has("instruction")
-                    instruction := node.ParamMap["instruction"]
-                else if node.Params.Length
-                    instruction := node.Params[1].Key = "" ? node.Params[1].Value : node.Params[1].Value
+                instruction := MacroParser.AiInstructionAndInput(node.Raw).Instruction
                 if blankOnly {
                     if Trim(instruction) = ""
                         return true

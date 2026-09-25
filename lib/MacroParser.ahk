@@ -174,6 +174,20 @@ class MacroParser {
         }
     }
 
+    ; {{ai}} takes instruction|input. Commas and "=" stay inside the instruction.
+    static AiInstructionAndInput(rawBody) {
+        trimmed := Trim(rawBody)
+        colon := this.FindTopLevelChar(trimmed, ":")
+        args := colon ? SubStr(trimmed, colon + 1) : ""
+        pipe := this.FindTopLevelChar(args, "|")
+        if pipe = 0
+            return {Instruction: Trim(args), Input: ""}
+        return {
+            Instruction: Trim(SubStr(args, 1, pipe - 1)),
+            Input: Trim(SubStr(args, pipe + 1))
+        }
+    }
+
     static SplitTopLevel(str) {
         items := []
         len := StrLen(str)

@@ -12,6 +12,8 @@ class AiService {
                 return this.Failure("Choose an AI model before sending.", key)
             if settings.Provider = "OpenAICompatible" && Trim(key) = ""
                 return this.Failure("Add an API key before sending.", key)
+            if !AiSettings.KeyTransportAllowed(settings.Provider, settings.Endpoint)
+                return this.Failure("OpenAI-compatible endpoints must use https, except on localhost.", key)
             content := this.UserContent(request)
             payload := Map(
                 "model", settings.Model,
@@ -33,7 +35,7 @@ class AiService {
             if status < 200 || status > 299
                 return this.Failure("The AI request failed.", key)
             body := HasProp(response, "Body") ? response.Body : ""
-            text := Trim(AiSettings.ReadReply(settings.Provider, Json.Decode(body)))
+            text := Trim(this.PlainText(AiSettings.ReadReply(settings.Provider, Json.Decode(body))))
             if text = ""
                 return this.Failure("AI reply was empty.", key)
             if StrLen(text) > this.MaxReplyChars
@@ -62,13 +64,31 @@ class AiService {
     static Failure(message, key) {
         return {Ok: false, Text: "", Error: AiSettings.Redact(message, key)}
     }
+
+    static PlainText(text) {
+        out := ""
+        loop parse String(text) {
+            code := Ord(A_LoopField)
+            if code = 9 || code = 10 || code = 13 || code >= 32
+                out .= A_LoopField
+        }
+        return out
+    }
 }
 
 class WinHttpTransport {
+    static TransportError(message) {
+        text := String(message)
+        if InStr(text, "timed out") || InStr(text, "timeout") || InStr(text, "80072EE2")
+            return "The AI request timed out."
+        return "The AI request failed."
+    }
+
     static Request(url, body, headers, timeoutSec) {
         timeoutMs := Integer(timeoutSec) * 1000
         try {
             web := ComObject("WinHttp.WinHttpRequest.5.1")
+            web.Option[6] := 0
             web.Open("POST", url, false)
             web.SetTimeouts(timeoutMs, timeoutMs, timeoutMs, timeoutMs)
             for name, value in headers
@@ -76,7 +96,7 @@ class WinHttpTransport {
             web.Send(body)
             return {Status: web.Status, Body: web.ResponseText, Error: ""}
         } catch as err {
-            message := InStr(err.Message, "timeout") ? "The AI request timed out." : "The AI request failed."
+            message := this.TransportError(err.Message)
             return {Status: 0, Body: "", Error: message}
         }
     }
