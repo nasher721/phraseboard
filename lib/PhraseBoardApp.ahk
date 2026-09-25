@@ -1134,7 +1134,7 @@ class PhraseBoardApp {
         this.PhraseList.OnEvent("ItemSelect", (*) => this.PreviewPhrase())
         this.PhraseList.OnEvent("DoubleClick", (*) => this.PastePhrase())
         this.PhraseList.OnEvent("ContextMenu", (ctrl, row, rightClick, x, y) => this.PhraseContextMenu(row, x, y))
-        this.PhrasePreview := g.AddCustom("ClassRICHEDIT50W x30 y345 w735 h112 ReadOnly +0x50010804 +0x10000")
+        this.PhrasePreview := g.AddCustom("ClassRICHEDIT50W x30 y345 w735 h112 +0x50010804 +0x10000")
         this.InsertButton := g.AddButton("x30 y471 w160 h32", "Insert phrase")
         this.InsertButton.OnEvent("Click", (*) => this.PastePhrase())
         this.NewButton := g.AddButton("x200 y471 w130 h32", "New phrase")
