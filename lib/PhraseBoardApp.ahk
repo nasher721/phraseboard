@@ -741,8 +741,6 @@ class PhraseBoardApp {
                     TrayTip("Target window changed. Nothing was pasted.", "PhraseBoard")
                     return
                 }
-                p.Uses += 1
-                try this.SavePhrases()
                 value := this.ExtractCursor(expanded)
                 SendText(value.Text)
                 terminator := TriggerEngine.TerminatorAction(IsObject(trigger) ? trigger : {Options: Map()}, endChar) = "Keep"
@@ -751,6 +749,8 @@ class PhraseBoardApp {
                     SendText(endChar)
                 if value.Cursor
                     SendEvent("{Left " (value.Cursor + StrLen(terminator)) "}")
+                p.Uses += 1
+                try SetTimer(ObjBindMethod(this, "SavePhrases"), -1000)
                 return
             }
         }
@@ -888,8 +888,8 @@ class PhraseBoardApp {
             throw Error("Enter a phrase name and its text.")
         if StrLen(text) > 100000
             throw Error("Keep each phrase under 100,000 characters.")
-        if abbr && !RegExMatch(abbr, "^[a-zA-Z0-9;._/-]{2,40}$")
-            throw Error("Use 2-40 letters, numbers, or `; . _ / - for the abbreviation, with no spaces.")
+        if abbr && !RegExMatch(abbr, "^[a-zA-Z0-9;._/-]{1,40}$")
+            throw Error("Use 1-40 letters, numbers, or `; . _ / - for the abbreviation, with no spaces.")
     }
     UpsertPhrase(name, abbr, text, id := "", tags := Chr(1), apps := Chr(1), folderId := "", editedTriggers := 0, aiPhrase := false) {
         this.ValidatePhrase(name, abbr, text, id)
